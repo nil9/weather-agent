@@ -26,7 +26,9 @@ Python tools do every calculation. The local LLM only picks which tools to call 
 
 | 12 | Dynamic forecast point: click → `GET /api/forecast_at` (same weighting as the agent, no LLM, cache per agent run, 40 km limit); chat answers for the selected point; one label per station | ✅ Done |
 
-*Last updated: end of step 12 (dynamic point).*
+| 13 | Land/sea check for clicked points: Natural Earth 1:10m land (`download_land.py`), shapely, 500 m coast tolerance, cached; land → 400 "This point is on land" | ✅ Done |
+
+*Last updated: end of step 13 (land/sea check).*
 
 `experiments.py` doesn't change the diagrams. It imports `agent.py`, swaps the task, the system prompt
 or entries in `agent.TOOL_FUNCTIONS`, and redirects `write_report` to `reports/experiment_<scenario>.md`.
@@ -210,7 +212,9 @@ sequenceDiagram
     T->>T: OK stations of the last agent run (forecast.json)
     alt nearest OK station > 40 km
         T-->>U: 400 "Outside forecast area" (previous point stays selected)
-    else inside
+    else on land (more than 500 m from the coast)
+        T-->>U: 400 "This point is on land. Marine forecast only for water."
+    else water, inside the area
         T->>T: station forecasts from cache<br/>(Holt-Winters once per agent run)
         T->>T: _idw_weights + _combine_daily<br/>(the same functions estimate_at_sea_point uses)
         T-->>U: same shape as forecast.json
@@ -225,4 +229,10 @@ sequenceDiagram
   per request with `tools.make_chat_tools(data)`, bound to that point's forecast.
 - **Labels:** one label per station ("SOUTH · 69 %", "EAST · excluded"). A small overlap check
   (on draw, zoom and pan) hides lower-priority labels; the forecast point's label always wins.
-- **Limit:** no land/sea mask, so points on land within 40 km also get a forecast.
+- **Land/sea check:** `tools.is_on_land()` uses Natural Earth 1:10m land polygons, clipped to Kiel Bay
+  by `download_land.py` (once) into `data/land_kiel_bay.geojson`. The land is shrunk by 0.5 km in a
+  local km grid, so points within 500 m of the coast count as water (the polygons are coarse).
+  It's loaded once and cached per point. A missing land file gives a clear 503, never a silent skip.
+- **Limit:** at 1:10m scale the coastline can be off by about 1 km. The SOUTH and WEST station
+  coordinates, for example, lie about 1 km "inland" on the polygons. Stations aren't checked, but
+  very narrow water (harbours, fjord inlets) may be rejected as land.

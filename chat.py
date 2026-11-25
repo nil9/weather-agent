@@ -312,6 +312,8 @@ def answer_question(question: str, history: list[dict] | None = None,
     history = without_refusals((history or [])[-MAX_HISTORY:])
     try:
         data = tools.load_forecast_data(point)     # forecast of THIS point, computed in code
+    except tools.LandDataMissing:
+        raise                                      # setup problem: report it as such
     except FileNotFoundError as exc:
         raise NoForecast(str(exc)) from exc
     dates = tools.forecast_dates(data)

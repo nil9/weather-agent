@@ -66,9 +66,11 @@ def forecast_at(lat: float = Query(ge=-90, le=90), lon: float = Query(ge=-180, l
     Station forecasts are cached per agent run, so this is fast after the first call."""
     try:
         return tools.forecast_at(lat, lon)
+    except tools.LandDataMissing as exc:          # setup problem, not the user's fault
+        raise HTTPException(503, str(exc))
     except FileNotFoundError as exc:
         raise HTTPException(404, str(exc))
-    except tools.OutsideForecastArea as exc:
+    except tools.PointRejected as exc:            # outside the area, or on land
         raise HTTPException(400, str(exc))
 
 
@@ -80,9 +82,11 @@ def ask(request: ChatRequest):
         return chat.answer_question(request.question.strip(),
                                     [m.model_dump() for m in request.history],
                                     request.point.model_dump() if request.point else None)
+    except tools.LandDataMissing as exc:
+        raise HTTPException(503, str(exc))
     except chat.NoForecast as exc:
         raise HTTPException(404, str(exc))
-    except tools.OutsideForecastArea as exc:
+    except tools.PointRejected as exc:            # outside the area, or on land
         raise HTTPException(400, str(exc))
     except chat.ChatUnavailable as exc:
         raise HTTPException(503, f"The local LLM is not reachable (is Ollama running?): {exc}")

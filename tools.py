@@ -9,6 +9,7 @@ Every tool:
 TOOL_SPECS at the bottom describes the tools to the LLM (OpenAI tool format).
 """
 import json
+import functools
 import math
 import re
 import threading
@@ -17,6 +18,10 @@ from pathlib import Path
 
 import numpy as np
 import pandas as pd
+from shapely.geometry import Point, shape
+import shapely
+from shapely.ops import unary_union
+from shapely.prepared import prep
 from statsmodels.tsa.holtwinters import ExponentialSmoothing
 
 BASE_DIR = Path(__file__).resolve().parent
@@ -530,8 +535,59 @@ VERDICTS = ["safe", "caution", "not safe"]
 PRESSURE_OUTLOOK = {"rising": "improving", "falling": "worsening", "steady": "stable"}
 
 
-class OutsideForecastArea(ValueError):
+class PointRejected(ValueError):
+    """A clicked point we can't forecast for (app.py turns this into HTTP 400)."""
+
+
+class OutsideForecastArea(PointRejected):
     """The clicked point is too far from every OK station."""
+
+
+class PointOnLand(PointRejected):
+    """The clicked point is on land; this is a marine forecast."""
+
+
+class LandDataMissing(FileNotFoundError):
+    """data/land_kiel_bay.geojson is missing (run download_land.py)."""
+
+
+# --- Land/sea check (Natural Earth 1:10m land, see download_land.py) -------------
+
+LAND_FILE = "land_kiel_bay.geojson"
+COAST_TOLERANCE_KM = 0.5     # points this close to the coast count as water (polygons are coarse)
+_KM_PER_DEG_LAT = 110.57
+_KM_PER_DEG_LON = 111.32 * math.cos(math.radians(54.5))   # Kiel Bay latitude
+
+
+def _to_km(lon: float, lat: float) -> tuple[float, float]:
+    """Simple local km grid for Kiel Bay. Degrees are not equal in size (1 deg of longitude
+    is only ~65 km here), so distances like "500 m" must be measured in km, not degrees.
+    Within ~100 km the error is below 1 %."""
+    return lon * _KM_PER_DEG_LON, lat * _KM_PER_DEG_LAT
+
+
+@functools.lru_cache(maxsize=1)
+def _inland_area():
+    """Land shrunk by COAST_TOLERANCE_KM, prepared for fast lookups. Loaded once."""
+    path = _safe_path(DATA_DIR, LAND_FILE)
+    if not path.exists():
+        raise LandDataMissing("Land data missing: run `python download_land.py` once.")
+    features = json.loads(path.read_text(encoding="utf-8"))["features"]
+    land_km = unary_union([shape(f["geometry"]) for f in features])
+    # degrees -> local km grid (same scaling as _to_km, applied to all coordinates at once)
+    land_km = shapely.transform(land_km, lambda xy: xy * [_KM_PER_DEG_LON, _KM_PER_DEG_LAT])
+    return prep(land_km.buffer(-COAST_TOLERANCE_KM))      # negative buffer = shrink
+
+
+@functools.lru_cache(maxsize=4096)
+def _is_on_land_rounded(lat: float, lon: float) -> bool:
+    return _inland_area().contains(Point(*_to_km(lon, lat)))
+
+
+def is_on_land(lat: float, lon: float) -> bool:
+    """True if the point is on land, more than COAST_TOLERANCE_KM from the coast.
+    Cached per point (rounded to 4 decimals, about 10 m)."""
+    return _is_on_land_rounded(round(lat, 4), round(lon, 4))
 
 
 def pressure_outlook(trend_label: str) -> str:
@@ -595,6 +651,8 @@ def forecast_at(lat: float, lon: float) -> dict:
         raise OutsideForecastArea(
             f"Outside forecast area: the nearest OK station ({nearest}) is "
             f"{dist[nearest]:.1f} km away (max {MAX_POINT_DISTANCE_KM} km).")
+    if is_on_land(lat, lon):
+        raise PointOnLand("This point is on land. Marine forecast only for water.")
 
     forecasts = _cached_station_forecasts(run)
     weights = _idw_weights(list(forecasts), lat, lon)

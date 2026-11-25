@@ -80,13 +80,50 @@ if tools.forecast_dates():
     start = time.time(); tools.forecast_at(54.50, 10.30); cached_ms = (time.time() - start) * 1000
     print(f"second point from cache: {cached_ms:.0f} ms")
 
-    near = {s["id"]: s["weight"] for s in tools.forecast_at(54.43, 10.38)["stations"]}
-    print("next to SOUTH, weights:", near)
-    on = {s["id"]: s["weight"] for s in tools.forecast_at(54.425, 10.378)["stations"]}
-    print("exactly on SOUTH, weights:", on)
+    # ~200 m off the (polygon) coast at SOUTH: water, so forecast_at accepts it
+    near = {s["id"]: s["weight"] for s in tools.forecast_at(54.4337, 10.3900)["stations"]}
+    print("just off SOUTH, weights:", near)
+    # Exactly on a station: stations sit on land, so test the weighting helper directly
+    on = tools._idw_weights(ok, 54.425, 10.378)
+    print("exactly on SOUTH (_idw_weights):", {s: round(w, 3) for s, w in on.items()})
     for lat, lon, label in [(55.40, 10.40, "60 km north"), (54.45, 11.06, "Fehmarn (only EAST nearby)")]:
         try:
             tools.forecast_at(lat, lon)
             print(f"{label}: accepted (bug!)")
         except tools.OutsideForecastArea as exc:
             print(f"{label}: {exc}")
+
+# ---------------------------------------------------------------------------
+# Land/sea check (Natural Earth 1:10m land, 500 m coast tolerance)
+# ---------------------------------------------------------------------------
+print("\n=== is_on_land ===")
+LAND_CASES = [
+    # (name, lat, lon, expected_on_land)
+    ("default sea point", 54.55, 10.45, False),
+    ("Kiel city (Schreventeich)", 54.33, 10.10, True),
+    ("open bay", 54.65, 10.60, False),
+    ("Fehmarn interior", 54.47, 11.15, True),
+    ("chat test point near WEST", 54.57, 10.12, False),
+    # Tolerance, measured from the polygon coastline near SOUTH (Schoenberger Strand):
+    ("200 m off the coast", 54.43373, 10.38997, False),
+    ("400 m inland (within tolerance)", 54.42950, 10.38416, False),
+    ("600 m inland (beyond tolerance)", 54.42809, 10.38223, True),
+]
+land_failures = 0
+for name, lat, lon, expected in LAND_CASES:
+    got = tools.is_on_land(lat, lon)
+    land_failures += got != expected
+    print(f"{'PASS' if got == expected else 'FAIL'}  {name}: {'land' if got else 'water'}")
+
+try:
+    tools.forecast_at(54.33, 10.10)
+    print("FAIL  forecast_at(Kiel) was accepted")
+    land_failures += 1
+except tools.PointOnLand as exc:
+    print(f"PASS  forecast_at(Kiel): {exc}")
+
+start = time.time()
+for _ in range(1000):
+    tools.is_on_land(54.33, 10.10)
+print(f"1000 cached checks: {(time.time() - start) * 1000:.1f} ms")
+print(f"land/sea: {'all passed' if not land_failures else f'{land_failures} FAILED'}")

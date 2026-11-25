@@ -25,6 +25,9 @@ ollama pull qwen2.5:7b
 # 3. Create the synthetic data (fixed seed, same data every time)
 python generate_data.py
 
+#    ...and download the coastline once (Natural Earth land, clipped to Kiel Bay, ~26 KB)
+python download_land.py
+
 # 4. Optional: call every tool once, without the LLM
 python test_tools.py
 
@@ -44,7 +47,9 @@ A run takes about 20–60 seconds on a local GPU.
 The map shows the stations (green = OK, red = SUSPECT; click one for details), the sea point with
 the 3-day forecast and warning badges, and dashed lines weighted by each station's share of the
 forecast. **Click anywhere** inside the dashed 40 km circles to get the forecast for that
-point. It is computed in code with the same weighting as the agent, without the LLM. The chat
+point. It is computed in code with the same weighting as the agent, without the LLM.
+Clicks on land get "This point is on land. Marine forecast only for water." (points within
+about 500 m of the coast count as water, because the 1:10m coastline is coarse). The chat
 then answers for that point. It needs an internet connection for the map tiles and the Leaflet
 library. The server only listens on localhost.
 
@@ -59,6 +64,7 @@ navigation advice. Run `python test_chat.py` to check the chat against a fixed s
 | File | Purpose |
 |------|---------|
 | `generate_data.py` | Writes `data/stations.json` and `data/observations.csv` (30 days, hourly) |
+| `download_land.py` | One-time download of Natural Earth 1:10m land polygons, clipped to Kiel Bay → `data/land_kiel_bay.geojson` (for the land/sea check) |
 | `tools.py` | The 6 tools (stations, observations, data quality, Holt-Winters forecast, sea-point estimate, write report) and their JSON specs |
 | `agent.py` | The agent loop: LLM → tool call → result → LLM … → final answer |
 | `test_tools.py` | Calls each tool once and prints the result |
