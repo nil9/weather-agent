@@ -16,7 +16,11 @@ Python tools do every calculation. The local LLM only picks which tools to call 
 | 3+ | `tools.py`: `estimate_at_sea_point` returns `pressure_trend` + Beaufort `warnings` | ✅ Done |
 | 4 | `experiments.py`: 6 "break" scenarios via runtime patching (agent/tools unchanged) | ✅ Done |
 
-*Last updated: end of step 4 (experiments).*
+| 5 | Guardrails in code: tools refuse SUSPECT stations, error instead of numbers, results wrapped as data, final answer needs a saved report, stop after 3 identical tool failures | ✅ Done |
+
+| 6 | Task validated before the loop; `write_report` checks the report against the last estimate; `experiments.py --runs N` with pass/fail | ✅ Done |
+
+*Last updated: end of step 6.*
 
 `experiments.py` doesn't change the diagrams. It imports `agent.py`, swaps the task, the system prompt
 or entries in `agent.TOOL_FUNCTIONS`, and redirects `write_report` to `reports/experiment_<scenario>.md`.
@@ -67,6 +71,9 @@ sequenceDiagram
     participant R as reports/ ✅
 
     U->>A: "Forecast the sea point for 3 days"
+    opt validate_task finds an unknown station or > 5 days
+        A-->>U: Rejected: ... (no LLM call at all)
+    end
     A->>A: messages = [system prompt, user request]
 
     loop until the LLM replies with no tool_calls (max MAX_STEPS = 15 LLM calls)
@@ -76,7 +83,15 @@ sequenceDiagram
         T->>D: read CSV / JSON
         D-->>T: rows
         T-->>A: short JSON string<br/>e.g. {"status": "SUSPECT", ...}<br/>or {"error": "..."} (never a crash)
-        A->>A: print trace line, append assistant msg +<br/>tool result (role "tool", tool_call_id)
+        A->>A: print trace line, append assistant msg +<br/>{"tool_result": ...} (role "tool", tool_call_id)
+        opt same tool failed 3 times in a row
+            A-->>U: Stopped: tool X failed 3 times
+        end
+    end
+
+    opt final answer but write_report never succeeded
+        A->>L: "You are not finished: call write_report" (max 2 reminders)
+        Note over A: still no report after 2 reminders → Stopped with an error
     end
 
     Note over L,T: Typical order: list_stations → check_data_quality (each station)<br/>→ get_observations → estimate_at_sea_point (OK stations only) → write_report
@@ -84,6 +99,7 @@ sequenceDiagram
     A->>L: chat.completions(messages, tools=TOOL_SPECS)
     L-->>A: tool_call write_report(text)
     A->>T: write_report(text)
+    T->>T: check: all numbers of the last estimate present?<br/>(missing → error back to the LLM)
     T->>R: save forecast_report.md (inside reports/ only)
     T-->>A: {"saved": "reports/forecast_report.md"}
     A->>L: chat.completions(messages, tools=TOOL_SPECS)
@@ -92,6 +108,18 @@ sequenceDiagram
 ```
 
 **Legend:** ✅ done, ⬜ not built yet.
+
+### Guardrails (in code, not just in the prompt)
+
+| # | Where | What it does |
+|---|-------|--------------|
+| 1 | `tools.estimate_at_sea_point` | Checks quality itself and drops SUSPECT stations (`stations_excluded`) |
+| 2 | `tools.forecast_station`, `estimate_at_sea_point` | SUSPECT station or none reliable left → `{"error": ...}`, never numbers |
+| 3 | `agent.wrap_as_data` + system prompt | Tool output is sent as `{"tool": ..., "tool_result": ...}` and declared to be data |
+| 4 | `agent.run_agent` | A final answer counts only after `write_report` succeeded; otherwise up to 2 reminders, then stop |
+| 5 | `agent.run_agent` | The same tool failing 3 times in a row stops the run |
+| 6 | `agent.validate_task` | Unknown station/location or more than 5 days → `Rejected: ...` before any LLM call |
+| 7 | `tools.write_report` | Saves only if the text contains every daily number of the last `estimate_at_sea_point` (or says "unavailable" when no forecast was possible) |
 
 Unknown tool names, broken argument JSON and bad arguments all come back to the LLM as
 `{"error": ...}` tool results, so the model can correct itself. If no final answer comes

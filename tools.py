@@ -10,6 +10,7 @@ TOOL_SPECS at the bottom describes the tools to the LLM (OpenAI tool format).
 """
 import json
 import math
+import re
 import warnings
 from pathlib import Path
 
@@ -29,6 +30,7 @@ MAX_JUMP = {                 # largest believable change in ONE hour
     "wind_speed_ms": 15.0,
 }
 TRAIN_DAYS = 14              # how much history the forecast model learns from
+MAX_FORECAST_DAYS = 5        # longest forecast we allow (the agent also checks the task)
 TREND_DAMPING = 0.9          # per hour; a trend fades out within ~1 day. If statsmodels
                              # fits this itself it picks ~0.98, and a fast pressure rise
                              # after the low then runs away to >1080 hPa.
@@ -40,6 +42,17 @@ WIND_WARNINGS = [
     (13.9, 7, "NEAR GALE"),
     (10.8, 6, "STRONG WIND"),
 ]
+REPORT_FIELDS = ["temp_min_c", "temp_max_c", "pressure_mean_hpa", "wind_max_ms"]
+
+# Memory between tool calls within ONE agent run. estimate_at_sea_point stores its
+# result here; write_report checks the report against it. reset_state() clears it.
+_last_estimate = None
+
+
+def reset_state():
+    """Forget the last estimate (call at the start of every agent run)."""
+    global _last_estimate
+    _last_estimate = None
 
 
 # ---------------------------------------------------------------------------
@@ -210,10 +223,12 @@ def get_observations(station: str, hours: int = 24) -> dict:
     }
 
 
-@_as_json
-def check_data_quality(station: str) -> dict:
-    """Look for stuck values, impossible jumps and gaps. Returns OK or SUSPECT."""
-    station = _check_station(station)
+def _quality_issues(station: str) -> list[str]:
+    """All data-quality problems of one station; an empty list means OK.
+
+    Not a tool itself: check_data_quality shows it to the LLM, and the forecast
+    tools call it internally so they can refuse bad stations on their own.
+    """
     df = _load_observations(station)
     issues = []
 
@@ -244,7 +259,14 @@ def check_data_quality(station: str) -> dict:
     missing_values = int(df.drop(columns="station_id").isna().sum().sum())
     if missing_values:
         issues.append(f"{missing_values} empty values")
+    return issues
 
+
+@_as_json
+def check_data_quality(station: str) -> dict:
+    """Look for stuck values, impossible jumps and gaps. Returns OK or SUSPECT."""
+    station = _check_station(station)
+    issues = _quality_issues(station)
     return {"station": station, "status": "SUSPECT" if issues else "OK", "issues": issues}
 
 
@@ -252,9 +274,14 @@ def check_data_quality(station: str) -> dict:
 def forecast_station(station: str, days: int = 3) -> dict:
     """Holt-Winters forecast for one station, summarised per day."""
     station = _check_station(station)
+    # Guardrail 2: an unreliable station gets an error, never numbers.
+    issues = _quality_issues(station)
+    if issues:
+        raise ValueError(f"Station {station} is SUSPECT ({'; '.join(issues)}). "
+                         "Its data is unreliable, so no forecast is given.")
     days = int(days)
-    if not 1 <= days <= 7:
-        raise ValueError("days must be between 1 and 7")
+    if not 1 <= days <= MAX_FORECAST_DAYS:
+        raise ValueError(f"days must be between 1 and {MAX_FORECAST_DAYS}")
     return {"station": station, "method": "Holt-Winters (damped trend, 24 h cycle)",
             "daily": _forecast_station_daily(station, days)}
 
@@ -265,9 +292,23 @@ def estimate_at_sea_point(stations: list[str], days: int = 3) -> dict:
     if not stations:
         raise ValueError("Give at least one station")
     stations = list(dict.fromkeys(_check_station(s) for s in stations))  # normalise, dedupe
+
+    # Guardrail 1: check quality here, whatever the LLM passed in. SUSPECT stations are dropped.
+    excluded = {s: _quality_issues(s) for s in stations}
+    excluded = {s: issues for s, issues in excluded.items() if issues}
+    stations = [s for s in stations if s not in excluded]
+
+    # Guardrail 2: nothing reliable left -> a clear error, never numbers.
+    global _last_estimate
+    if not stations:
+        reason = f"every requested station is SUSPECT ({', '.join(excluded)})"
+        _last_estimate = {"unavailable": reason}   # write_report will expect an "unavailable" report
+        raise ValueError(
+            f"No reliable station left: {reason}. A sea-point forecast is NOT possible. "
+            "Do not invent numbers: write a report saying the forecast is unavailable and why.")
     days = int(days)
-    if not 1 <= days <= 7:
-        raise ValueError("days must be between 1 and 7")
+    if not 1 <= days <= MAX_FORECAST_DAYS:
+        raise ValueError(f"days must be between 1 and {MAX_FORECAST_DAYS}")
 
     # Weight = 1 / distance^2  -> closer stations count more. Normalised to sum to 1.
     info = _load_stations()
@@ -278,11 +319,10 @@ def estimate_at_sea_point(stations: list[str], days: int = 3) -> dict:
     weights = {s: w / sum(raw.values()) for s, w in raw.items()}
 
     forecasts = {s: _forecast_station_daily(s, days) for s in stations}
-    fields = ["temp_min_c", "temp_max_c", "pressure_mean_hpa", "wind_max_ms"]
     daily = []
     for i in range(days):
         day = {"date": forecasts[stations[0]][i]["date"]}
-        for f in fields:
+        for f in REPORT_FIELDS:
             day[f] = round(sum(weights[s] * forecasts[s][i][f] for s in stations), 1)
         day["wind_warning"] = _wind_warning(day["wind_max_ms"])
         daily.append(day)
@@ -293,17 +333,48 @@ def estimate_at_sea_point(stations: list[str], days: int = 3) -> dict:
     if trend["label"] == "falling":
         warnings.append(f"Falling pressure: {trend['change_hpa']} hPa over the period")
 
-    return {"point": sea["id"], "stations_used": stations,
-            "weights": {s: round(w, 3) for s, w in weights.items()}, "daily": daily,
-            "pressure_trend": trend, "warnings": warnings}
+    result = {"point": sea["id"], "stations_used": stations, "stations_excluded": excluded,
+              "weights": {s: round(w, 3) for s, w in weights.items()}, "daily": daily,
+              "pressure_trend": trend, "warnings": warnings}
+    _last_estimate = result      # remembered so write_report can check the report
+    return result
+
+
+def _missing_forecast_numbers(text: str) -> list[str]:
+    """Forecast values from the last estimate that do NOT appear in the report text.
+
+    All numbers in the text are compared as floats, so "14" counts as 14.0.
+    """
+    found = {float(x) for x in re.findall(r"\d+(?:\.\d+)?", text)}
+    return [f"{day['date']} {field}={day[field]}"
+            for day in _last_estimate["daily"]
+            for field in REPORT_FIELDS
+            if abs(float(day[field])) not in found]
 
 
 @_as_json
 def write_report(text: str, filename: str = "forecast_report.md") -> dict:
-    """Save a Markdown report inside ./reports (and nowhere else)."""
+    """Save a Markdown report inside ./reports (and nowhere else).
+
+    Guardrail: the report must match the last estimate_at_sea_point result, so a
+    placeholder or invented numbers can't be saved as a "forecast".
+    """
     if not filename.endswith(".md"):
         raise ValueError("filename must end with .md")
     path = _safe_path(REPORTS_DIR, filename)   # raises if it points outside reports/
+    if _last_estimate is None:
+        raise ValueError("No forecast to report yet: call estimate_at_sea_point first. If it "
+                         "says no forecast is possible, write a report saying it is unavailable.")
+    if "unavailable" in _last_estimate:
+        if not re.search(r"unavailable|not possible", text, re.IGNORECASE):
+            raise ValueError("The last estimate_at_sea_point said no forecast is possible "
+                             f"({_last_estimate['unavailable']}). The report must say the "
+                             "forecast is unavailable and why, without forecast numbers.")
+    else:
+        missing = _missing_forecast_numbers(text)
+        if missing:
+            raise ValueError("Report rejected: these forecast numbers from estimate_at_sea_point "
+                             f"are missing: {', '.join(missing)}. Include the full day-by-day table.")
     REPORTS_DIR.mkdir(exist_ok=True)
     path.write_text(text, encoding="utf-8")
     return {"saved": str(path.relative_to(BASE_DIR)), "characters": len(text)}
@@ -315,7 +386,7 @@ def write_report(text: str, filename: str = "forecast_report.md") -> dict:
 
 _STATION_PARAM = {"type": "string", "enum": ["NORTH", "EAST", "SOUTH", "WEST"],
                   "description": "Station id"}
-_DAYS_PARAM = {"type": "integer", "minimum": 1, "maximum": 7, "default": 3,
+_DAYS_PARAM = {"type": "integer", "minimum": 1, "maximum": MAX_FORECAST_DAYS, "default": 3,
                "description": "Number of days to forecast"}
 
 
@@ -344,11 +415,12 @@ TOOL_SPECS = [
           {"station": _STATION_PARAM}, ["station"]),
     _spec("forecast_station",
           "Forecast one station with Holt-Winters. Returns per-day temperature min/max, "
-          "mean pressure and max wind speed.",
+          "mean pressure and max wind speed. Returns an error for SUSPECT stations.",
           {"station": _STATION_PARAM, "days": _DAYS_PARAM}, ["station"]),
     _spec("estimate_at_sea_point",
           "Forecast the sea point by combining the forecasts of the given stations with "
-          "inverse-distance weighting. Only pass stations whose data quality is OK. "
+          "inverse-distance weighting. SUSPECT stations are excluded automatically "
+          "(listed in stations_excluded); if none is reliable it returns an error. "
           "Returns per-day values with a wind_warning, the pressure_trend "
           "(rising/falling/steady) and a list of warnings.",
           {"stations": {"type": "array", "items": _STATION_PARAM, "minItems": 1,
@@ -356,7 +428,9 @@ TOOL_SPECS = [
            "days": _DAYS_PARAM},
           ["stations"]),
     _spec("write_report",
-          "Save the final forecast report as a Markdown file in the reports folder.",
+          "Save the final forecast report as a Markdown file in the reports folder. "
+          "The text must contain every daily number from the last estimate_at_sea_point "
+          "result (temp min/max, mean pressure, max wind), or it is rejected.",
           {"text": {"type": "string", "description": "The full report in Markdown"},
            "filename": {"type": "string", "default": "forecast_report.md",
                         "description": "File name ending in .md (no folders)"}},
