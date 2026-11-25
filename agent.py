@@ -101,20 +101,23 @@ def validate_task(task: str) -> str | None:
     return None
 
 
-def run_tool(name: str, arguments_json: str) -> str:
+def run_tool(name: str, arguments_json: str, functions: dict | None = None) -> str:
     """Execute one tool call from the LLM and return its JSON result string.
 
     Never raises: every problem becomes {"error": "..."}, which goes back to the
     LLM as the tool result, so the model can read it and correct itself.
+    `functions` is the table of allowed tools (default: the agent's TOOL_FUNCTIONS).
     """
-    if name not in TOOL_FUNCTIONS:
-        return json.dumps({"error": f"Unknown tool '{name}'. Available: {list(TOOL_FUNCTIONS)}"})
+    if functions is None:
+        functions = TOOL_FUNCTIONS          # looked up at call time, so experiments can patch it
+    if name not in functions:
+        return json.dumps({"error": f"Unknown tool '{name}'. Available: {list(functions)}"})
     try:
         args = json.loads(arguments_json or "{}")   # '{"station": "EAST"}' -> dict
     except json.JSONDecodeError as exc:
         return json.dumps({"error": f"Arguments are not valid JSON: {exc}"})
     try:
-        return TOOL_FUNCTIONS[name](**args)         # e.g. check_data_quality(station="EAST")
+        return functions[name](**args)              # e.g. check_data_quality(station="EAST")
     except TypeError as exc:                        # wrong or missing argument names
         return json.dumps({"error": f"Bad arguments for {name}: {exc}"})
     except Exception as exc:                        # anything else: still don't crash

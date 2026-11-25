@@ -488,3 +488,154 @@ TOOL_SPECS = [
                         "description": "File name ending in .md (no folders)"}},
           ["text"]),
 ]
+
+
+# ===========================================================================
+# Chat tools (read-only). Used by chat.py for the map page's chat panel.
+# They only read reports/forecast.json, the same data the map shows.
+# ===========================================================================
+
+# Beaufort scale: lower limit (m/s) of each force 1..12.
+BEAUFORT_LIMITS = [0.5, 1.6, 3.4, 5.5, 8.0, 10.8, 13.9, 17.2, 20.8, 24.5, 28.5, 32.7]
+SAFE_MAX_BFT = 4             # up to Bft 4 (moderate breeze): safe
+CAUTION_MAX_BFT = 6          # Bft 5-6: caution; Bft 7 and up: not safe
+VERDICTS = ["safe", "caution", "not safe"]
+# What a pressure trend means for the weather (rising pressure = the low is moving away).
+PRESSURE_OUTLOOK = {"rising": "improving", "falling": "worsening", "steady": "stable"}
+
+
+def pressure_outlook(trend_label: str) -> str:
+    return PRESSURE_OUTLOOK.get(trend_label, "unknown")
+
+
+def current_pressure_trend() -> str | None:
+    """The trend label of the current forecast ("rising"/"falling"/"steady"), or None."""
+    try:
+        forecast = _load_forecast_json()["forecast"]
+    except FileNotFoundError:
+        return None
+    return forecast["pressure_trend"]["label"] if forecast else None
+
+
+def _beaufort(wind_ms: float) -> int:
+    """Beaufort force (0-12) for a wind speed in m/s."""
+    return sum(wind_ms >= limit for limit in BEAUFORT_LIMITS)
+
+
+def _load_forecast_json() -> dict:
+    path = _safe_path(REPORTS_DIR, "forecast.json")
+    if not path.exists():
+        raise FileNotFoundError("No forecast yet. Run `python agent.py` first.")
+    return json.loads(path.read_text(encoding="utf-8"))
+
+
+def _require_forecast(data: dict) -> dict:
+    if data["forecast"] is None:
+        raise ValueError(f"No forecast available: {data.get('unavailable_reason')}")
+    return data["forecast"]
+
+
+def forecast_dates() -> list[str]:
+    """The dates covered by the current forecast (empty if there is none)."""
+    try:
+        forecast = _load_forecast_json()["forecast"]
+    except FileNotFoundError:
+        return []
+    return [d["date"] for d in forecast["daily"]] if forecast else []
+
+
+@_as_json
+def get_forecast(day: str | None = None) -> dict:
+    """Sea-point forecast: daily values (all days, or one `day`) and the pressure trend."""
+    data = _load_forecast_json()
+    forecast = _require_forecast(data)
+    # Add the Beaufort force (computed here) so the LLM never converts m/s itself.
+    daily = [{**d, "wind_max_beaufort": _beaufort(d["wind_max_ms"])} for d in forecast["daily"]]
+    if day:
+        daily = [d for d in daily if d["date"] == day]
+        if not daily:
+            raise ValueError(f"Unknown day '{day}'. Forecast days: {forecast_dates()}")
+    return {"point": data["sea_point"]["name"], "daily": daily,
+            "pressure_trend": forecast["pressure_trend"],
+            "pressure_outlook": pressure_outlook(forecast["pressure_trend"]["label"])}
+
+
+@_as_json
+def get_station_status(station: str | None = None) -> dict:
+    """Status, issues, distance and weight of one station, or of all stations."""
+    stations = _load_forecast_json()["stations"]
+    if station:
+        name = _check_station(station)
+        stations = [s for s in stations if s["id"] == name]
+    return {"stations": stations}
+
+
+@_as_json
+def get_warnings() -> dict:
+    """All forecast warnings (wind and falling pressure)."""
+    forecast = _require_forecast(_load_forecast_json())
+    trend = forecast["pressure_trend"]["label"]
+    return {"warnings": forecast["warnings"], "pressure_trend": trend,
+            "pressure_outlook": pressure_outlook(trend)}
+
+
+@_as_json
+def sail_safety(day: str) -> dict:
+    """Sailing verdict for one forecast day, decided by fixed rules (not by the LLM).
+
+    Bft <= 4: safe, Bft 5-6: caution, Bft >= 7: not safe.
+    A falling pressure trend raises the verdict one level.
+    """
+    forecast = _require_forecast(_load_forecast_json())
+    days = {d["date"]: d for d in forecast["daily"]}
+    if day not in days:
+        raise ValueError(f"Unknown day '{day}'. Forecast days: {list(days)}")
+    d = days[day]
+    bft = _beaufort(d["wind_max_ms"])
+    trend = forecast["pressure_trend"]["label"]
+
+    if bft <= SAFE_MAX_BFT:
+        level = 0
+        reasons = [f"max wind {d['wind_max_ms']} m/s = Beaufort {bft} (up to Bft {SAFE_MAX_BFT} is safe)"]
+    elif bft <= CAUTION_MAX_BFT:
+        level = 1
+        reasons = [f"max wind {d['wind_max_ms']} m/s = Beaufort {bft} (Bft 5-6 means caution)"]
+    else:
+        level = 2
+        reasons = [f"max wind {d['wind_max_ms']} m/s = Beaufort {bft} (Bft 7 or more is not safe)"]
+    outlook = pressure_outlook(trend)
+    if trend == "falling":
+        reasons.append("pressure is falling, so conditions are worsening")
+        if level < 2:
+            level += 1
+            reasons.append("because of the worsening, the verdict is raised one level")
+    elif trend == "rising":
+        reasons.append("pressure is rising, so conditions are improving "
+                       "(this does not lower the wind-based verdict)")
+    else:
+        reasons.append("pressure is steady, so conditions are stable")
+
+    return {"date": day, "wind_max_ms": d["wind_max_ms"], "beaufort": bft,
+            "pressure_trend": trend, "pressure_outlook": outlook,
+            "verdict": VERDICTS[level], "reasons": reasons}
+
+
+def chat_tool_specs() -> list[dict]:
+    """Specs for the chat tools. Built on each request, so sail_safety lists the real dates."""
+    day_param = {"type": "string", "enum": forecast_dates(), "description": "Forecast date, YYYY-MM-DD"}
+    return [
+        _spec("get_forecast",
+              "Sea-point forecast: per day temp min/max, mean pressure, max wind and wind "
+              "warning, plus the pressure trend. Leave out `day` to get all days.",
+              {"day": day_param}),
+        _spec("get_station_status",
+              "Status (OK/SUSPECT), data issues, distance and weight of the stations. "
+              "Leave out `station` to get all stations.",
+              {"station": _STATION_PARAM}),
+        _spec("get_warnings", "All warnings for the forecast period."),
+        _spec("sail_safety",
+              "Sailing verdict (safe / caution / not safe) for one day, decided by fixed rules "
+              "from wind (Beaufort) and pressure trend. Always use this for safety questions.",
+              {"day": day_param},
+              ["day"]),
+    ]

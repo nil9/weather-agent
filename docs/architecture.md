@@ -20,8 +20,11 @@ Python tools do every calculation. The local LLM only picks which tools to call 
 | 7 | `agent.TEMPERATURE` setting; `experiments.py --temperature` | ✅ Done |
 | 8 | `MAX_STEPS = 20`; `max_tokens` and a timeout on each LLM call (no silent SDK retries) | ✅ Done |
 | 9 | Map: real Kiel Bay coordinates, `reports/forecast.json`, `app.py` (FastAPI, localhost), `web/index.html` (Leaflet) | ✅ Done |
+| 10 | Chat panel: `POST /api/chat`, `chat.py` (topic gate, read-only tools, answer checks), `sail_safety` decided in code, `test_chat.py` | ✅ Done |
 
-*Last updated: end of step 9 (map).*
+| 11 | Chat fixes: keyword pre-gate (code), "if in doubt YES", pressure outlook (rising = improving), stricter number check, day mapping; 22 regression questions | ✅ Done |
+
+*Last updated: end of step 11 (chat fixes).*
 
 `experiments.py` doesn't change the diagrams. It imports `agent.py`, swaps the task, the system prompt
 or entries in `agent.TOOL_FUNCTIONS`, and redirects `write_report` to `reports/experiment_<scenario>.md`.
@@ -37,7 +40,8 @@ flowchart LR
     llm["Ollama LLM<br/>qwen2.5:7b<br/>localhost:11434/v1"]
     reports[("reports/<br/>*.md, forecast.json")]
     app["app.py<br/>FastAPI, 127.0.0.1:8000"]
-    web["web/index.html<br/>Leaflet + CARTO Dark Matter"]
+    chat["chat.py<br/>topic gate + read-only<br/>tool loop + answer checks"]
+    web["web/index.html<br/>Leaflet + OSM tiles (dark filter)<br/>Forecast / Ask tabs"]
     browser(["Browser"])
 
     gen -->|writes| data
@@ -51,10 +55,15 @@ flowchart LR
     reports -->|"forecast.json (read only)"| app
     web --> app
     app -->|"GET / and GET /api/forecast"| browser
+    browser -->|"POST /api/chat"| app
+    app --> chat
+    chat -->|"gate + chat loop"| llm
+    chat -->|"read-only chat tools<br/>(sail_safety etc.)"| tools
+    reports -->|"forecast.json"| tools
 
     classDef done fill:#d4edda,stroke:#28a745,color:#155724
     classDef todo fill:#f1f3f5,stroke:#adb5bd,color:#495057,stroke-dasharray: 5 5
-    class gen,data,tools,reports,agent,llm,app,web done
+    class gen,data,tools,reports,agent,llm,app,web,chat done
 ```
 
 **Legend:** green = done, grey dashed = not built yet.
@@ -70,6 +79,9 @@ Notes:
   `agent.py` calls it in `main()` after a successful run; experiments never write it.
 - The map page calculates nothing; it only displays `/api/forecast`. `app.py` binds to 127.0.0.1 only.
 - Stations sit on the real Kiel Bay coast (Marstal, Fehmarn, Schönberger Strand, Damp); the weather data is synthetic.
+- The chat only gets read-only tools that read `forecast.json` (no `write_report`). The sailing verdict
+  comes from `tools.sail_safety()` (Bft ≤ 4 safe, 5–6 caution, ≥ 7 not safe; falling pressure raises it
+  one level). The LLM only explains it.
 
 ## 2. One agent run (sequence)
 
@@ -139,3 +151,44 @@ after `MAX_STEPS` LLM calls, the run stops with a message.
 
 The key idea: the LLM never runs code. It only *asks* for a tool call. `agent.py` runs the real function
 and sends the JSON result back as a `tool` message. The loop repeats until the LLM answers with plain text.
+
+## 3. One chat question (sequence)
+
+```mermaid
+sequenceDiagram
+    actor U as Browser (Ask tab)
+    participant P as app.py
+    participant C as chat.py
+    participant L as Ollama LLM
+    participant T as tools.py (read-only)
+
+    U->>P: POST /api/chat {question, last 6 messages}
+    P->>C: answer_question()
+    C->>C: gate step 1 (code): forecast words? → YES, skip the LLM
+    C->>L: gate step 2 (only without such words): "YES/NO?", if in doubt YES
+    alt NO
+        C-->>U: "I can only answer about this forecast." (code, no tools)
+    else YES
+        loop max 6 LLM calls
+            C->>L: question + chat tool specs
+            L-->>C: tool_calls, e.g. sail_safety("2026-11-26")
+            C->>T: run_tool(..., CHAT_TOOL_FUNCTIONS)
+            T-->>C: {"verdict": "caution", ...} (decided in code)
+        end
+        L-->>C: answer text
+        C->>C: check: numbers from tools? verdict repeated?<br/>required tool called? (one retry, then "couldn't answer reliably")
+        C-->>U: {answer, tools_used, safety}
+    end
+```
+
+| Chat guardrail (code) | What it does |
+|---|---|
+| Topic gate | Step 1 (code): questions with forecast words (wind, pressure, temperature, days, stations, sailing, forecast, warnings …) always pass. Step 2: other questions get a YES/NO LLM call, "if in doubt YES"; NO → fixed refusal, no tools run |
+| History filter | Refused exchanges are removed from the history before the LLM sees it |
+| Read-only tools | `CHAT_TOOL_FUNCTIONS` has no `write_report`; tools only read `forecast.json` |
+| Required tools | Safety words → `sail_safety` **for every day named** (today / tomorrow / weekdays are mapped to dates in code); station words → `get_station_status`; value words (wind, pressure, temperature, warnings) → a forecast tool. Only short follow-ups without their own subject ("and on Friday?") inherit the previous question's topic |
+| Number check | Every number in the answer must appear in this question's tool results. Whole dates are removed first, so a date's parts (the 25 in 2026-11-25) can't excuse an invented value like "25 knots" |
+| Pressure check | If the answer talks about the pressure **trend**, it must state the outlook from code: rising = improving, falling = worsening, steady = stable, and nothing contradicting it |
+| Verdict check | The answer must repeat each `sail_safety` verdict exactly |
+| Forced retry | Ollama ignores `tool_choice`, so the retry offers **only** the missing tool, and the rejected answer is dropped |
+| Safe UI | LLM text is shown with `textContent` (never HTML); verdict badges come from `safety`, not from the text |

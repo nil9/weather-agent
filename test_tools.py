@@ -35,3 +35,29 @@ show("estimate_at_sea_point(['EAST'])  (nothing reliable -> error)",
      tools.estimate_at_sea_point(["EAST"]))
 
 print(f"\n{len(tools.TOOL_SPECS)} tool specs:", [t["function"]["name"] for t in tools.TOOL_SPECS])
+
+# ---------------------------------------------------------------------------
+# Chat tools (read reports/forecast.json; run `python agent.py` first)
+# ---------------------------------------------------------------------------
+if not tools.forecast_dates():
+    print("\n(skipping chat tools: no reports/forecast.json yet)")
+else:
+    show("get_warnings()", tools.get_warnings())
+    for day in tools.forecast_dates():
+        show(f"sail_safety('{day}')", tools.sail_safety(day))
+    show("sail_safety('2030-01-01')  (unknown day -> error)", tools.sail_safety("2030-01-01"))
+
+    # The escalation rule, with a faked FALLING pressure trend: every verdict goes up one level.
+    real_load = tools._load_forecast_json
+    def falling_trend():
+        data = real_load()
+        data["forecast"]["pressure_trend"]["label"] = "falling"
+        return data
+    tools._load_forecast_json = falling_trend
+    print("\n=== sail_safety with a faked falling pressure trend ===")
+    for day in tools.forecast_dates():
+        r = json.loads(tools.sail_safety(day))
+        print(f"{day}: Bft {r['beaufort']} -> {r['verdict']}   ({'; '.join(r['reasons'])})")
+    tools._load_forecast_json = real_load
+
+    print("\nBeaufort checks:", {ms: tools._beaufort(ms) for ms in [0.4, 5.4, 7.9, 8.0, 10.8, 13.9, 33.0]})
