@@ -1,0 +1,67 @@
+{
+  "generated_at": "2026-11-25T14:44:36Z",
+  "task": "Make the 3-day marine forecast for the sea point and save the report.",
+  "temperature": 0,
+  "scoring_rule": "Any failed guardrail = disqualified. Then: fewer tool errors, then fewer steps, then less LLM time.",
+  "winner": "qwen2.5:14b",
+  "runs": [
+    {
+      "model": "qwen2.5:14b",
+      "rank": 1,
+      "disqualified": false,
+      "disqualify_reasons": [],
+      "steps": 6,
+      "tool_calls": 10,
+      "tool_errors": 0,
+      "reminders": 1,
+      "llm_seconds": 51.57,
+      "stopped": null,
+      "report_saved": true,
+      "report_path": "reports/forecast_report_qwen2.5-14b.md",
+      "answer": "The report has been saved at reports/forecast_report_qwen2.5-14b.md.",
+      "forecast": {
+        "stations_used": [
+          "NORTH",
+          "SOUTH",
+          "WEST"
+        ],
+        "wind_max_ms": [
+          15.0,
+          13.6,
+          13.5
+        ],
+        "pressure_trend": "rising",
+        "warnings": 3
+      }
+    },
+    {
+      "model": "qwen2.5:7b",
+      "rank": 2,
+      "disqualified": false,
+      "disqualify_reasons": [],
+      "steps": 12,
+      "tool_calls": 11,
+      "tool_errors": 1,
+      "reminders": 0,
+      "llm_seconds": 15.0,
+      "stopped": null,
+      "report_saved": true,
+      "report_path": "reports/forecast_report_qwen2.5-7b.md",
+      "answer": "Report saved as reports/forecast_report_qwen2.5-7b.md.",
+      "forecast": {
+        "stations_used": [
+          "NORTH",
+          "SOUTH",
+          "WEST"
+        ],
+        "wind_max_ms": [
+          15.0,
+          13.6,
+          13.5
+        ],
+        "pressure_trend": "rising",
+        "warnings": 3
+      }
+    }
+  ]
+}

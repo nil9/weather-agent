@@ -5,6 +5,7 @@
   GET  /api/forecast_at?lat=..&lon=..
                       -> forecast for a clicked point, computed in code (no LLM)
   POST /api/chat      -> answer a question about the selected point (chat.py, read-only tools)
+  GET  /api/model_comparison -> reports/model_comparison.json (written by compare_models.py)
 
 Nothing here writes files. User input (coordinates, the chat question) is range- or
 length-checked; the LLM can only use read-only tools.
@@ -25,6 +26,7 @@ import tools
 BASE_DIR = Path(__file__).resolve().parent
 INDEX_HTML = BASE_DIR / "web" / "index.html"
 FORECAST_JSON = BASE_DIR / "reports" / "forecast.json"
+COMPARISON_JSON = BASE_DIR / "reports" / "model_comparison.json"
 
 HOST = "127.0.0.1"     # localhost only: other machines on the network can't connect
 PORT = 8000
@@ -42,6 +44,13 @@ def forecast():
     if not FORECAST_JSON.exists():
         raise HTTPException(404, "No forecast yet. Run `python agent.py` first.")
     return json.loads(FORECAST_JSON.read_text(encoding="utf-8"))
+
+
+@app.get("/api/model_comparison")
+def model_comparison():
+    if not COMPARISON_JSON.exists():
+        raise HTTPException(404, "No model comparison yet. Run `python compare_models.py`.")
+    return json.loads(COMPARISON_JSON.read_text(encoding="utf-8"))
 
 
 class ChatMessage(BaseModel):

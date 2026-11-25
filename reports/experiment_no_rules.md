@@ -1,28 +1,34 @@
-## 3-Day Marine Forecast
+#### 3天海洋预报
 
-Day 1 (2026-11-25):
-- Temperature Min: 5.5°C
-- Temperature Max: 11.7°C
-- Pressure: 1004.3 mbar
-- Maximum Wind Speed: 14.0 knots
-- Wind Warning: NEAR GALE (Beaufort 7, max 14.0 m/s)
+- **日期**: 2026-11-25
+- **温度**
+  - 最低温度: 6.1°C
+  - 最高温度: 12.4°C
+- **平均气压**: 1003.4 hPa
+- **最大风速**: 15.0 m/s
+- **风力警告**: NEAR GALE (Beaufort 7, max 15.0 m/s)
 
-Day 2 (2026-11-26):
-- Temperature Min: 5.6°C
-- Temperature Max: 11.8°C
-- Pressure: 1008.9 mbar
-- Maximum Wind Speed: 11.9 knots
-- Wind Warning: STRONG WIND (Beaufort 6, max 11.9 m/s)
+- **日期**: 2026-11-26
+- **温度**
+  - 最低温度: 6.2°C
+  - 最高温度: 12.4°C
+- **平均气压**: 1008.1 hPa
+- **最大风速**: 13.6 m/s
+- **风力警告**: STRONG WIND (Beaufort 6, max 13.6 m/s)
 
-Day 3 (2026-11-27):
-- Temperature Min: 5.6°C
-- Temperature Max: 11.8°C
-- Pressure: 1009.3 mbar
-- Maximum Wind Speed: 11.8 knots
-- Wind Warning: STRONG WIND (Beaufort 6, max 11.8 m/s)
+- **日期**: 2026-11-27
+- **温度**
+  - 最低温度: 6.2°C
+  - 最高温度: 12.4°C
+- **平均气压**: 1008.5 hPa
+- **最大风速**: 13.5 m/s
+- **风力警告**: STRONG WIND (Beaufort 6, max 13.5 m/s)
 
-**Note:** The forecast was generated using data from the weather stations NORTH, SOUTH, and WEST. The station EAST was excluded due to issues with its sensor data, including a stuck value and multiple pressure jumps.
+- **气压趋势**: 上升 (从 1003.4 hPa 增加到 1008.5 hPa)
 
-The pressure trend is rising, with a change of 5.0 mbar over the 3 days.
+- **警告**: 
+  - 2026-11-25: NEAR GALE (Beaufort 7, max 15.0 m/s)
+  - 2026-11-26: STRONG WIND (Beaufort 6, max 13.6 m/s)
+  - 2026-11-27: STRONG WIND (Beaufort 6, max 13.5 m/s)
 
-**Wind Warning:** There is a near gale condition on the first day and strong wind conditions on the subsequent days.
+**注意**: EAST 站点因数据不可靠而被排除在预报之外。使用了 NORTH、SOUTH 和 WEST 站点来生成预报，权重分别为: NORTH (0.126), SOUTH (0.688), WEST (0.186).

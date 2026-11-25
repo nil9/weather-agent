@@ -1,18 +1,22 @@
-# Marine Weather Forecast for Point at Sea
+### 3-Day Forecast Summary for Kiel Bay (open water)
 
-## Summary
-- **Pressure Trend:** Rising from 1004.3 hPa to 1009.3 hPa with a change of 5.0 hPa.
-- **Wind Warnings:**
-  - Near gale (Beaufort 7, max 14.0 m/s) on 2026-11-25.
-  - Strong wind (Beaufort 6, max 11.9 m/s) on 2026-11-26.
-  - Strong wind (Beaufort 6, max 11.8 m/s) on 2026-11-27.
+#### Overview
+The forecast for the next three days in Kiel Bay predicts mild temperatures with a range of 4.5°C to 12.9°C and moderate pressure conditions, with mean pressures between 1001.0 hPa and 1014.7 hPa. Wind speeds are expected to remain below 16.1 m/s.
 
-## Day-by-Day Table
-| Date       | Min Temp (°C) | Max Temp (°C) | Mean Pressure (hPa) | Max Wind (m/s) | Warning                     |
-|------------|---------------|---------------|--------------------|----------------|------------------------------|
-| 2026-11-25 | 5.5           | 11.7          | 1004.3             | 14.0           | Near gale (Beaufort 7)       |
-| 2026-11-26 | 5.6           | 11.8          | 1008.9             | 11.9           | Strong wind (Beaufort 6)    |
-| 2026-11-27 | 5.6           | 11.8          | 1009.3             | 11.8           | Strong wind (Beaufort 6)    |
+#### Day-by-Day Summary
+| Date | Min Temp (°C) | Max Temp (°C) | Mean Pressure (hPa) | Max Wind Speed (m/s) |
+|------|---------------|---------------|---------------------|----------------------|
+| 2026-11-25 | 6.1 | 12.4 | 1003.4 | 15.0 |
+| 2026-11-26 | 6.2 | 12.4 | 1008.1 | 13.6 |
+| 2026-11-27 | 6.2 | 12.4 | 1008.5 | 13.5 |
 
-## Stations Excluded
-- **EAST** (SUSPECT due to data quality issues)
+#### Warnings
+- **2026-11-25:** NEAR GALE (Beaufort 7, max 15.0 m/s)
+- **2026-11-26:** STRONG WIND (Beaufort 6, max 13.6 m/s)
+- **2026-11-27:** STRONG WIND (Beaufort 6, max 13.5 m/s)
+
+#### Pressure Trend
+The pressure trend is **rising** over the forecast period.
+
+#### Excluded Stations
+- East: Data quality is SUSPECT due to temperature_c stuck at 7.4 for 216 h (from 2026-11-16 00:00) and pressure_hpa showing 12 single-hour jumps > 5.0 (largest 41.2).

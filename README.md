@@ -35,6 +35,9 @@ python test_tools.py
 python agent.py
 cat reports/forecast_report.md
 
+# 5b. Optional: compare models (needs `ollama pull qwen2.5:14b`); the winner feeds the map
+python compare_models.py
+
 # 6. Show the forecast map
 python app.py
 # then open http://127.0.0.1:8000 in your browser (Ctrl+C stops the server)
@@ -72,8 +75,11 @@ navigation advice. Run `python test_chat.py` to check the chat against a fixed s
 | `chat.py` | Chat logic: topic gate, read-only tool loop, answer checks (numbers, verdicts, required tools) |
 | `test_chat.py` | Chat regression tests: all suggestion chips, 12 normal questions, 5 off-topic questions, 3 questions for a clicked point; answers checked against the tools (`--runs N`) |
 | `web/index.html` | The map page: Leaflet + OpenStreetMap tiles with a dark CSS filter (no API key), Forecast / Ask tabs |
-| `experiments.py` | Runs the agent in "break" scenarios with pass/fail checks: `python experiments.py <scenario>` or `python experiments.py all --runs 5` |
+| `compare_models.py` | Runs the agent with each model in `agent.MODELS` one after another, ranks the runs in code, saves the winner to `forecast.json` and all runs to `model_comparison.json` |
+| `test_compare.py` | Tests the ranking rules (no LLM needed) |
+| `experiments.py` | Runs the agent in "break" scenarios with pass/fail checks: `python experiments.py <scenario>` or `python experiments.py all --runs 5 [--temperature 0.7] [--model qwen2.5:14b]` |
 | `docs/architecture.md` | Diagrams and build progress |
+| `reports/logs/` | Saved outputs of experiment, comparison and chat-test runs |
 
 ## Architecture
 

@@ -413,17 +413,22 @@ def write_report(text: str, filename: str = "forecast_report.md") -> dict:
 # Not a tool: called by agent.py after a successful run, never by the LLM.
 # ---------------------------------------------------------------------------
 
-def save_forecast_json() -> str:
+def save_forecast_json(estimate: dict | None = None, report: str | None = None,
+                       model: str | None = None) -> str:
     """Write reports/forecast.json for the map page, built only from tool results.
 
     Contains every station (coordinates, quality status, weight), the sea point,
-    and the last sea-point forecast. Returns the saved path.
+    and the sea-point forecast. By default it uses the last estimate of this process;
+    compare_models.py passes the WINNING run's snapshot (`estimate`, `report`, `model`).
+    Returns the saved path.
     """
-    if _last_estimate is None:
+    estimate = estimate if estimate is not None else _last_estimate
+    report = report if report is not None else _last_report_path
+    if estimate is None:
         raise ValueError("No estimate in this run: nothing to save")
     info = _load_stations()
     sea = info["forecast_point"]
-    weights = _last_estimate.get("weights", {})
+    weights = estimate.get("weights", {})
 
     stations = []
     for s in info["stations"]:
@@ -436,12 +441,12 @@ def save_forecast_json() -> str:
             "weight": weights.get(s["id"]),        # None = not used in the forecast
         })
 
-    unavailable = _last_estimate.get("unavailable")
+    unavailable = estimate.get("unavailable")
     forecast = None if unavailable else {
-        "daily": _last_estimate["daily"],
-        "pressure_trend": _last_estimate["pressure_trend"],
-        "warnings": _last_estimate["warnings"],
-        "stations_used": _last_estimate["stations_used"],
+        "daily": estimate["daily"],
+        "pressure_trend": estimate["pressure_trend"],
+        "warnings": estimate["warnings"],
+        "stations_used": estimate["stations_used"],
     }
     data = {
         "generated_at": pd.Timestamp.now(tz="UTC").strftime("%Y-%m-%dT%H:%M:%SZ"),
@@ -449,7 +454,8 @@ def save_forecast_json() -> str:
         "stations": stations,
         "forecast": forecast,                       # None if no forecast was possible
         "unavailable_reason": unavailable,
-        "report": _last_report_path,
+        "report": report,
+        "model": model,                             # which LLM ran the agent (None if unknown)
     }
     path = _safe_path(REPORTS_DIR, "forecast.json")
     REPORTS_DIR.mkdir(exist_ok=True)
@@ -698,14 +704,17 @@ def current_pressure_trend(data: dict | None = None) -> str | None:
     return forecast["pressure_trend"]["label"] if forecast else None
 
 
-def _get_forecast(data: dict, day: str | None = None) -> dict:
+def _get_forecast(data: dict, day: str | list[str] | None = None) -> dict:
+    """Daily forecast for one date, a list of dates, or (day=None) all days."""
     forecast = _require_forecast(data)
     # Add the Beaufort force (computed here) so the LLM never converts m/s itself.
     daily = [{**d, "wind_max_beaufort": _beaufort(d["wind_max_ms"])} for d in forecast["daily"]]
     if day:
-        daily = [d for d in daily if d["date"] == day]
-        if not daily:
-            raise ValueError(f"Unknown day '{day}'. Forecast days: {forecast_dates(data)}")
+        wanted = [day] if isinstance(day, str) else list(day)   # models also send lists
+        unknown = [d for d in wanted if d not in {row["date"] for row in daily}]
+        if unknown:
+            raise ValueError(f"Unknown day(s) {unknown}. Forecast days: {forecast_dates(data)}")
+        daily = [row for row in daily if row["date"] in wanted]
     point = data["sea_point"]
     return {"point": point["name"], "lat": point["lat"], "lon": point["lon"], "daily": daily,
             "pressure_trend": forecast["pressure_trend"],
@@ -779,7 +788,7 @@ def make_chat_tools(data: dict) -> dict:
 
 # Default-point versions (forecast.json), used by test_tools.py.
 @_as_json
-def get_forecast(day: str | None = None) -> dict:
+def get_forecast(day: str | list[str] | None = None) -> dict:
     return _get_forecast(_load_forecast_json(), day)
 
 
@@ -805,8 +814,9 @@ def chat_tool_specs(data: dict | None = None) -> list[dict]:
         _spec("get_forecast",
               "Forecast for the selected point: per day temp min/max, mean pressure, max wind "
               "(m/s and Beaufort) and wind warning, plus the pressure trend and outlook. "
-              "Leave out `day` to get all days.",
-              {"day": day_param}),
+              "`day` can be one date or a list of dates; leave it out to get all days.",
+              {"day": {"anyOf": [day_param, {"type": "array", "items": day_param}],
+                       "description": "One forecast date or a list of dates (YYYY-MM-DD)"}}),
         _spec("get_station_status",
               "Status (OK/SUSPECT), data issues, distance to the selected point and weight of "
               "the stations. Leave out `station` to get all stations.",

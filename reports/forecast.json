@@ -1,5 +1,5 @@
 {
-  "generated_at": "2026-11-25T14:24:10Z",
+  "generated_at": "2026-11-25T14:44:36Z",
   "sea_point": {
     "id": "SEA",
     "name": "Kiel Bay (open water)",
@@ -96,5 +96,6 @@
     ]
   },
   "unavailable_reason": null,
-  "report": "reports/forecast_report.md"
+  "report": "reports/forecast_report_qwen2.5-14b.md",
+  "model": "qwen2.5:14b"
 }

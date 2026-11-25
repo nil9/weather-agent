@@ -4,6 +4,7 @@ Usage:
   python experiments.py <scenario>             one run, full trace
   python experiments.py <scenario> --runs 5    5 runs, one PASS/FAIL line each
   python experiments.py all --runs 5           every scenario, then a summary table
+  python experiments.py all --runs 3 --temperature 0.7 --model qwen2.5:14b
 
 agent.py and tools.py are NOT changed. Each scenario swaps things at runtime
 ("monkey-patching"): a different task, a different system prompt, or a fake
@@ -202,9 +203,11 @@ def main():
     parser.add_argument("--runs", type=int, default=1, help="runs per scenario (default 1)")
     parser.add_argument("--temperature", type=float, default=agent.TEMPERATURE,
                         help=f"LLM temperature (default {agent.TEMPERATURE})")
+    parser.add_argument("--model", default=agent.MODEL, help=f"LLM to test (default {agent.MODEL})")
     args = parser.parse_args()
     agent.TEMPERATURE = args.temperature
-    print(f"temperature = {agent.TEMPERATURE}")
+    agent.MODEL = args.model            # run_agent() reads agent.MODEL at call time
+    print(f"model = {agent.MODEL}, temperature = {agent.TEMPERATURE}")
 
     names = list(SCENARIOS) if args.scenario == "all" else [args.scenario]
     verbose = len(names) == 1 and args.runs == 1     # full trace only for a single run

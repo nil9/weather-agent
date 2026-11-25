@@ -110,6 +110,16 @@
   .point-btn:hover { border-color: var(--sea); }
   .hint { color: var(--muted); font-size: 12px; margin-top: 6px; }
   .chat-point { color: var(--muted); font-size: 12px; margin-top: 8px; }
+  table.cmp { width: 100%; border-collapse: collapse; font-size: 12px; }
+  table.cmp th { color: var(--muted); font-weight: 600; text-align: right; padding: 4px 4px;
+                 border-bottom: 1px solid var(--line); white-space: nowrap; }
+  table.cmp td { text-align: right; padding: 5px 4px; border-bottom: 1px solid var(--line);
+                 font-variant-numeric: tabular-nums; }
+  table.cmp th:first-child, table.cmp td:first-child { text-align: left; }
+  table.cmp tr.winner td { color: var(--text); font-weight: 700; }
+  table.cmp tr.out td { color: var(--muted); }
+  table.cmp .ok { color: var(--ok); } table.cmp .bad { color: var(--bad); }
+  .cmp-note { color: var(--muted); font-size: 11px; margin-top: 6px; }
   .msg.note { align-self: center; color: var(--muted); font-size: 12px; font-style: italic;
               background: none; padding: 2px 0; }
 
@@ -488,9 +498,42 @@ function drawPanel(data) {
     panel.append(row);
   });
 
-  const generated = new Date(data.generated_at).toLocaleString("en-GB", { timeZone: "UTC" });
+  drawComparison(panel);
+
+  const run = defaultData || data;
+  const generated = new Date(run.generated_at).toLocaleString("en-GB", { timeZone: "UTC" });
   panel.append(el("div", "note",
-    `Generated ${generated} UTC by agent.py · Report: ${data.report || "–"} · Synthetic data, for learning only.`));
+    `Generated ${generated} UTC by agent.py${run.model ? " (" + run.model + ")" : ""} · ` +
+    `Report: ${run.report || "–"} · Synthetic data, for learning only.`));
+}
+
+// ---------------------------------------------------------------- model comparison
+// Filled from /api/model_comparison (written by compare_models.py). Hidden if missing.
+// The ranking is decided in code; the page only displays it.
+let comparison = null;
+
+function drawComparison(panel) {
+  if (!comparison) return;
+  panel.append(el("h2", null, "Model comparison"));
+  const table = el("table", "cmp");
+  const head = el("tr");
+  ["Model", "Guardrails", "Tool errors", "Steps", "LLM time"].forEach(h => head.append(el("th", null, h)));
+  table.append(head);
+  comparison.runs.forEach(r => {
+    const row = el("tr", r.model === comparison.winner ? "winner" : (r.disqualified ? "out" : ""));
+    row.append(el("td", null, (r.model === comparison.winner ? "🏆 " : "") + r.model));
+    const guard = el("td", r.disqualified ? "bad" : "ok", r.disqualified ? "✗" : "✓");
+    if (r.disqualified) guard.title = r.disqualify_reasons.join("; ");
+    row.append(guard,
+      el("td", null, String(r.tool_errors)),
+      el("td", null, String(r.steps)),
+      el("td", null, `${r.llm_seconds.toFixed(1)} s`));
+    table.append(row);
+  });
+  panel.append(table);
+  panel.append(el("div", "cmp-note", comparison.winner
+    ? `Winner ${comparison.winner} produced this forecast. ${comparison.scoring_rule}`
+    : `No valid run. ${comparison.scoring_rule}`));
 }
 
 // ---------------------------------------------------------------- load
@@ -500,8 +543,12 @@ fetch("/api/forecast")
     if (!r.ok) throw new Error(body.detail || r.statusText);
     return body;
   })
-  .then(data => {
+  .then(async data => {
     defaultData = data;
+    try {                                   // optional: only exists after compare_models.py
+      const r = await fetch("/api/model_comparison");
+      if (r.ok) comparison = await r.json();
+    } catch (err) { /* no comparison: the section stays hidden */ }
     drawArea(data);
     show(data, true);
     pointChanged();

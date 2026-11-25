@@ -221,7 +221,11 @@ def main():
             ok, reason = check(r)
             results.setdefault(group, []).append(ok)
             context = "  [after previous question]" if history else ""
-            print(f"  {'PASS' if ok else 'FAIL'}  ({time.time() - start:4.1f} s)  "
+            st = r.get("tool_stats") or {}
+            calls = (f"tools {st['executed']}/{st['requested']}"
+                     + (f", {st['cached']} cached" if st.get("cached") else "")
+                     + (f", {st['refused']} over cap" if st.get("refused") else "")) if st else "no tools"
+            print(f"  {'PASS' if ok else 'FAIL'}  ({time.time() - start:4.1f} s, {calls})  "
                   f"[{group}] {question!r}{context} -> {reason}")
             if not ok:
                 print(f"        answer: {r['answer']}")
