@@ -1,0 +1,29 @@
+{
+  "stations": [
+    {
+      "id": "NORTH",
+      "lat": 54.6,
+      "lon": 10.05
+    },
+    {
+      "id": "EAST",
+      "lat": 54.45,
+      "lon": 10.3
+    },
+    {
+      "id": "SOUTH",
+      "lat": 54.3,
+      "lon": 10.05
+    },
+    {
+      "id": "WEST",
+      "lat": 54.45,
+      "lon": 9.8
+    }
+  ],
+  "forecast_point": {
+    "id": "SEA",
+    "lat": 54.45,
+    "lon": 10.05
+  }
+}
