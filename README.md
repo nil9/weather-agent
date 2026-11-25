@@ -43,6 +43,7 @@ and saves the report to `reports/forecast_report.md`. A run takes about 30–60 
 | `tools.py` | The 6 tools (stations, observations, data quality, Holt-Winters forecast, sea-point estimate, write report) and their JSON specs |
 | `agent.py` | The agent loop: LLM → tool call → result → LLM … → final answer |
 | `test_tools.py` | Calls each tool once and prints the result |
+| `experiments.py` | Runs the agent in "break" scenarios: `python experiments.py <scenario>` (run without arguments to list them) |
 | `docs/architecture.md` | Diagrams and build progress |
 
 ## Architecture

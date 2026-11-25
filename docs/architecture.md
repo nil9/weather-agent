@@ -14,8 +14,12 @@ Python tools do every calculation. The local LLM only picks which tools to call 
 | 3c | `agent.py`: full loop, `tool` messages, `MAX_STEPS = 15`, errors go back to the LLM | ✅ Done |
 | 3d | `agent.py`: readable trace (tool, args, shortened result) | ✅ Done |
 | 3+ | `tools.py`: `estimate_at_sea_point` returns `pressure_trend` + Beaufort `warnings` | ✅ Done |
+| 4 | `experiments.py`: 6 "break" scenarios via runtime patching (agent/tools unchanged) | ✅ Done |
 
-*Last updated: end of step 3.*
+*Last updated: end of step 4 (experiments).*
+
+`experiments.py` doesn't change the diagrams. It imports `agent.py`, swaps the task, the system prompt
+or entries in `agent.TOOL_FUNCTIONS`, and redirects `write_report` to `reports/experiment_<scenario>.md`.
 
 ## 1. Components
 

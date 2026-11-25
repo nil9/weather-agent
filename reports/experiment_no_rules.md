@@ -1,0 +1,1 @@
+This is where the detailed 3-day marine forecast for the sea point will be summarized.
