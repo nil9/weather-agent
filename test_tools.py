@@ -61,3 +61,32 @@ else:
     tools._load_forecast_json = real_load
 
     print("\nBeaufort checks:", {ms: tools._beaufort(ms) for ms in [0.4, 5.4, 7.9, 8.0, 10.8, 13.9, 33.0]})
+
+# ---------------------------------------------------------------------------
+# Forecast at a clicked point (map), computed in code
+# ---------------------------------------------------------------------------
+import time
+
+if tools.forecast_dates():
+    print("\n=== forecast_at (map clicks) ===")
+    sea = tools._load_stations()["forecast_point"]
+    ok = [s["id"] for s in tools._load_forecast_json()["stations"] if s["status"] == "OK"]
+    agent_path = json.loads(tools.estimate_at_sea_point(ok))
+    click_path = tools.forecast_at(sea["lat"], sea["lon"])["forecast"]
+    same = (agent_path["daily"] == click_path["daily"]
+            and agent_path["pressure_trend"] == click_path["pressure_trend"])
+    print(f"default sea point, agent vs. click: {'IDENTICAL' if same else 'DIFFERENT (bug!)'}")
+
+    start = time.time(); tools.forecast_at(54.50, 10.30); cached_ms = (time.time() - start) * 1000
+    print(f"second point from cache: {cached_ms:.0f} ms")
+
+    near = {s["id"]: s["weight"] for s in tools.forecast_at(54.43, 10.38)["stations"]}
+    print("next to SOUTH, weights:", near)
+    on = {s["id"]: s["weight"] for s in tools.forecast_at(54.425, 10.378)["stations"]}
+    print("exactly on SOUTH, weights:", on)
+    for lat, lon, label in [(55.40, 10.40, "60 km north"), (54.45, 11.06, "Fehmarn (only EAST nearby)")]:
+        try:
+            tools.forecast_at(lat, lon)
+            print(f"{label}: accepted (bug!)")
+        except tools.OutsideForecastArea as exc:
+            print(f"{label}: {exc}")

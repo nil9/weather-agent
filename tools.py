@@ -11,6 +11,7 @@ TOOL_SPECS at the bottom describes the tools to the LLM (OpenAI tool format).
 import json
 import math
 import re
+import threading
 import warnings
 from pathlib import Path
 
@@ -167,6 +168,44 @@ def _wind_warning(wind_max_ms: float) -> str | None:
     return None
 
 
+AT_STATION_KM = 0.1          # a point this close to a station simply takes that station's forecast
+
+
+def _idw_weights(stations: list[str], lat: float, lon: float) -> dict[str, float]:
+    """Inverse-distance weights (1 / distance^2), normalised to sum to 1.
+
+    Shared by estimate_at_sea_point (agent) and forecast_at (map clicks), so both
+    always use exactly the same logic.
+    """
+    coords = {s["id"]: s for s in _load_stations()["stations"]}
+    dist = {s: _distance_km(coords[s]["lat"], coords[s]["lon"], lat, lon) for s in stations}
+    nearest = min(dist, key=dist.get)
+    if dist[nearest] < AT_STATION_KM:             # on top of a station: avoid dividing by ~0
+        return {s: 1.0 if s == nearest else 0.0 for s in stations}
+    raw = {s: 1 / d ** 2 for s, d in dist.items()}
+    return {s: w / sum(raw.values()) for s, w in raw.items()}
+
+
+def _combine_daily(forecasts: dict[str, list[dict]], weights: dict[str, float]) -> dict:
+    """Weighted daily rows plus ready-made interpretations (warnings, pressure trend),
+    so the LLM never has to judge numbers itself."""
+    stations = list(forecasts)
+    daily = []
+    for i in range(len(forecasts[stations[0]])):
+        day = {"date": forecasts[stations[0]][i]["date"]}
+        for f in REPORT_FIELDS:
+            # float(): plain Python numbers, not numpy types (those can't be sent as JSON)
+            day[f] = round(float(sum(weights[s] * forecasts[s][i][f] for s in stations)), 1)
+        day["wind_warning"] = _wind_warning(day["wind_max_ms"])
+        daily.append(day)
+
+    trend = _pressure_trend(daily[0]["pressure_mean_hpa"], daily[-1]["pressure_mean_hpa"])
+    warnings = [f"{d['date']}: {d['wind_warning']}" for d in daily if d["wind_warning"]]
+    if trend["label"] == "falling":
+        warnings.append(f"Falling pressure: {trend['change_hpa']} hPa over the period")
+    return {"daily": daily, "pressure_trend": trend, "warnings": warnings}
+
+
 def _as_json(func):
     """Decorator: turn a tool's dict result (or exception) into a JSON string."""
     def wrapper(*args, **kwargs):
@@ -312,32 +351,13 @@ def estimate_at_sea_point(stations: list[str], days: int = 3) -> dict:
     if not 1 <= days <= MAX_FORECAST_DAYS:
         raise ValueError(f"days must be between 1 and {MAX_FORECAST_DAYS}")
 
-    # Weight = 1 / distance^2  -> closer stations count more. Normalised to sum to 1.
-    info = _load_stations()
-    sea = info["forecast_point"]
-    coords = {s["id"]: s for s in info["stations"]}
-    raw = {s: 1 / _distance_km(coords[s]["lat"], coords[s]["lon"], sea["lat"], sea["lon"]) ** 2
-           for s in stations}
-    weights = {s: w / sum(raw.values()) for s, w in raw.items()}
-
+    sea = _load_stations()["forecast_point"]
+    weights = _idw_weights(stations, sea["lat"], sea["lon"])
     forecasts = {s: _forecast_station_daily(s, days) for s in stations}
-    daily = []
-    for i in range(days):
-        day = {"date": forecasts[stations[0]][i]["date"]}
-        for f in REPORT_FIELDS:
-            day[f] = round(sum(weights[s] * forecasts[s][i][f] for s in stations), 1)
-        day["wind_warning"] = _wind_warning(day["wind_max_ms"])
-        daily.append(day)
-
-    # Ready-made interpretations, so the LLM never has to judge numbers itself.
-    trend = _pressure_trend(daily[0]["pressure_mean_hpa"], daily[-1]["pressure_mean_hpa"])
-    warnings = [f"{d['date']}: {d['wind_warning']}" for d in daily if d["wind_warning"]]
-    if trend["label"] == "falling":
-        warnings.append(f"Falling pressure: {trend['change_hpa']} hPa over the period")
+    combined = _combine_daily(forecasts, weights)
 
     result = {"point": sea["id"], "stations_used": stations, "stations_excluded": excluded,
-              "weights": {s: round(w, 3) for s, w in weights.items()}, "daily": daily,
-              "pressure_trend": trend, "warnings": warnings}
+              "weights": {s: round(w, 3) for s, w in weights.items()}, **combined}
     _last_estimate = result      # remembered so write_report can check the report
     return result
 
@@ -491,9 +511,15 @@ TOOL_SPECS = [
 
 
 # ===========================================================================
-# Chat tools (read-only). Used by chat.py for the map page's chat panel.
-# They only read reports/forecast.json, the same data the map shows.
+# Forecast at any point (map clicks) and the chat tools.
+#
+# Both work on a "forecast data" dict with the same shape as reports/forecast.json:
+#   {"sea_point": {...}, "stations": [...], "forecast": {...}, ...}
+# The default is forecast.json itself (the agent's sea point). For a clicked point,
+# forecast_at() builds the same shape. Nothing here calls the LLM.
 # ===========================================================================
+
+MAX_POINT_DISTANCE_KM = 40   # clicks farther than this from every OK station are rejected
 
 # Beaufort scale: lower limit (m/s) of each force 1..12.
 BEAUFORT_LIMITS = [0.5, 1.6, 3.4, 5.5, 8.0, 10.8, 13.9, 17.2, 20.8, 24.5, 28.5, 32.7]
@@ -504,22 +530,17 @@ VERDICTS = ["safe", "caution", "not safe"]
 PRESSURE_OUTLOOK = {"rising": "improving", "falling": "worsening", "steady": "stable"}
 
 
+class OutsideForecastArea(ValueError):
+    """The clicked point is too far from every OK station."""
+
+
 def pressure_outlook(trend_label: str) -> str:
     return PRESSURE_OUTLOOK.get(trend_label, "unknown")
 
 
-def current_pressure_trend() -> str | None:
-    """The trend label of the current forecast ("rising"/"falling"/"steady"), or None."""
-    try:
-        forecast = _load_forecast_json()["forecast"]
-    except FileNotFoundError:
-        return None
-    return forecast["pressure_trend"]["label"] if forecast else None
-
-
 def _beaufort(wind_ms: float) -> int:
     """Beaufort force (0-12) for a wind speed in m/s."""
-    return sum(wind_ms >= limit for limit in BEAUFORT_LIMITS)
+    return int(sum(wind_ms >= limit for limit in BEAUFORT_LIMITS))
 
 
 def _load_forecast_json() -> dict:
@@ -535,58 +556,126 @@ def _require_forecast(data: dict) -> dict:
     return data["forecast"]
 
 
-def forecast_dates() -> list[str]:
-    """The dates covered by the current forecast (empty if there is none)."""
+# --- Point forecast with a cache per agent run --------------------------------
+
+_station_forecast_cache: dict[str, dict] = {}   # {run id: {station: daily rows}}
+_cache_lock = threading.Lock()
+
+
+def _cached_station_forecasts(run: dict) -> dict[str, list[dict]]:
+    """Holt-Winters forecasts of the run's OK stations, computed once per agent run.
+
+    The run id is forecast.json's generated_at: a new `python agent.py` run gives a
+    new id, so the cache refills itself. Only the latest run is kept.
+    """
+    run_id = run["generated_at"]
+    with _cache_lock:                    # two first clicks at once: compute only once
+        if run_id not in _station_forecast_cache:
+            ok = [s["id"] for s in run["stations"] if s["status"] == "OK"]
+            days = len(run["forecast"]["daily"])
+            _station_forecast_cache.clear()
+            _station_forecast_cache[run_id] = {s: _forecast_station_daily(s, days) for s in ok}
+        return _station_forecast_cache[run_id]
+
+
+def forecast_at(lat: float, lon: float) -> dict:
+    """Forecast for any point, in code (no LLM), in the same shape as forecast.json.
+
+    Uses only the stations the last agent run marked OK and the same inverse-distance
+    weighting as estimate_at_sea_point (_idw_weights + _combine_daily).
+    """
+    run = _load_forecast_json()
+    _require_forecast(run)
+    ok = [s for s in run["stations"] if s["status"] == "OK"]
+    if not ok:
+        raise ValueError("The last agent run has no OK stations.")
+    dist = {s["id"]: _distance_km(s["lat"], s["lon"], lat, lon) for s in ok}
+    nearest = min(dist, key=dist.get)
+    if dist[nearest] > MAX_POINT_DISTANCE_KM:
+        raise OutsideForecastArea(
+            f"Outside forecast area: the nearest OK station ({nearest}) is "
+            f"{dist[nearest]:.1f} km away (max {MAX_POINT_DISTANCE_KM} km).")
+
+    forecasts = _cached_station_forecasts(run)
+    weights = _idw_weights(list(forecasts), lat, lon)
+    combined = _combine_daily(forecasts, weights)
+    stations = [{**s,
+                 "distance_km": round(_distance_km(s["lat"], s["lon"], lat, lon), 1),
+                 "weight": round(weights[s["id"]], 3) if s["id"] in weights else None}
+                for s in run["stations"]]
+    return {
+        "generated_at": run["generated_at"],
+        "sea_point": {"id": "POINT", "name": "Selected point",
+                      "lat": round(lat, 4), "lon": round(lon, 4)},
+        "stations": stations,
+        "forecast": {**combined, "stations_used": list(forecasts)},
+        "unavailable_reason": None,
+        "report": run.get("report"),
+        "selected": True,
+    }
+
+
+def load_forecast_data(point: dict | None = None) -> dict:
+    """forecast.json for the default sea point, or forecast_at() for a selected point."""
+    return forecast_at(point["lat"], point["lon"]) if point else _load_forecast_json()
+
+
+# --- Chat tools: pure functions of a forecast data dict ------------------------
+
+def forecast_dates(data: dict | None = None) -> list[str]:
+    """Dates covered by the forecast (default: forecast.json); empty if there is none."""
     try:
-        forecast = _load_forecast_json()["forecast"]
+        forecast = (data or _load_forecast_json())["forecast"]
     except FileNotFoundError:
         return []
     return [d["date"] for d in forecast["daily"]] if forecast else []
 
 
-@_as_json
-def get_forecast(day: str | None = None) -> dict:
-    """Sea-point forecast: daily values (all days, or one `day`) and the pressure trend."""
-    data = _load_forecast_json()
+def current_pressure_trend(data: dict | None = None) -> str | None:
+    """"rising" / "falling" / "steady" for the forecast (default: forecast.json), or None."""
+    try:
+        forecast = (data or _load_forecast_json())["forecast"]
+    except FileNotFoundError:
+        return None
+    return forecast["pressure_trend"]["label"] if forecast else None
+
+
+def _get_forecast(data: dict, day: str | None = None) -> dict:
     forecast = _require_forecast(data)
     # Add the Beaufort force (computed here) so the LLM never converts m/s itself.
     daily = [{**d, "wind_max_beaufort": _beaufort(d["wind_max_ms"])} for d in forecast["daily"]]
     if day:
         daily = [d for d in daily if d["date"] == day]
         if not daily:
-            raise ValueError(f"Unknown day '{day}'. Forecast days: {forecast_dates()}")
-    return {"point": data["sea_point"]["name"], "daily": daily,
+            raise ValueError(f"Unknown day '{day}'. Forecast days: {forecast_dates(data)}")
+    point = data["sea_point"]
+    return {"point": point["name"], "lat": point["lat"], "lon": point["lon"], "daily": daily,
             "pressure_trend": forecast["pressure_trend"],
             "pressure_outlook": pressure_outlook(forecast["pressure_trend"]["label"])}
 
 
-@_as_json
-def get_station_status(station: str | None = None) -> dict:
-    """Status, issues, distance and weight of one station, or of all stations."""
-    stations = _load_forecast_json()["stations"]
+def _get_station_status(data: dict, station: str | None = None) -> dict:
+    stations = data["stations"]
     if station:
         name = _check_station(station)
         stations = [s for s in stations if s["id"] == name]
     return {"stations": stations}
 
 
-@_as_json
-def get_warnings() -> dict:
-    """All forecast warnings (wind and falling pressure)."""
-    forecast = _require_forecast(_load_forecast_json())
+def _get_warnings(data: dict) -> dict:
+    forecast = _require_forecast(data)
     trend = forecast["pressure_trend"]["label"]
     return {"warnings": forecast["warnings"], "pressure_trend": trend,
             "pressure_outlook": pressure_outlook(trend)}
 
 
-@_as_json
-def sail_safety(day: str) -> dict:
+def _sail_safety(data: dict, day: str) -> dict:
     """Sailing verdict for one forecast day, decided by fixed rules (not by the LLM).
 
     Bft <= 4: safe, Bft 5-6: caution, Bft >= 7: not safe.
     A falling pressure trend raises the verdict one level.
     """
-    forecast = _require_forecast(_load_forecast_json())
+    forecast = _require_forecast(data)
     days = {d["date"]: d for d in forecast["daily"]}
     if day not in days:
         raise ValueError(f"Unknown day '{day}'. Forecast days: {list(days)}")
@@ -603,7 +692,6 @@ def sail_safety(day: str) -> dict:
     else:
         level = 2
         reasons = [f"max wind {d['wind_max_ms']} m/s = Beaufort {bft} (Bft 7 or more is not safe)"]
-    outlook = pressure_outlook(trend)
     if trend == "falling":
         reasons.append("pressure is falling, so conditions are worsening")
         if level < 2:
@@ -616,26 +704,60 @@ def sail_safety(day: str) -> dict:
         reasons.append("pressure is steady, so conditions are stable")
 
     return {"date": day, "wind_max_ms": d["wind_max_ms"], "beaufort": bft,
-            "pressure_trend": trend, "pressure_outlook": outlook,
+            "pressure_trend": trend, "pressure_outlook": pressure_outlook(trend),
             "verdict": VERDICTS[level], "reasons": reasons}
 
 
-def chat_tool_specs() -> list[dict]:
-    """Specs for the chat tools. Built on each request, so sail_safety lists the real dates."""
-    day_param = {"type": "string", "enum": forecast_dates(), "description": "Forecast date, YYYY-MM-DD"}
+def make_chat_tools(data: dict) -> dict:
+    """The chat's tool table, bound to ONE forecast (one point). Built per request, so
+    two users asking about different points at the same time can't mix data."""
+    return {
+        "get_forecast": _as_json(lambda day=None: _get_forecast(data, day)),
+        "get_station_status": _as_json(lambda station=None: _get_station_status(data, station)),
+        "get_warnings": _as_json(lambda: _get_warnings(data)),
+        "sail_safety": _as_json(lambda day: _sail_safety(data, day)),
+    }
+
+
+# Default-point versions (forecast.json), used by test_tools.py.
+@_as_json
+def get_forecast(day: str | None = None) -> dict:
+    return _get_forecast(_load_forecast_json(), day)
+
+
+@_as_json
+def get_station_status(station: str | None = None) -> dict:
+    return _get_station_status(_load_forecast_json(), station)
+
+
+@_as_json
+def get_warnings() -> dict:
+    return _get_warnings(_load_forecast_json())
+
+
+@_as_json
+def sail_safety(day: str) -> dict:
+    return _sail_safety(_load_forecast_json(), day)
+
+
+def chat_tool_specs(data: dict | None = None) -> list[dict]:
+    """Specs for the chat tools. Built per request, so the `day` enums list the real dates."""
+    day_param = {"type": "string", "enum": forecast_dates(data), "description": "Forecast date, YYYY-MM-DD"}
     return [
         _spec("get_forecast",
-              "Sea-point forecast: per day temp min/max, mean pressure, max wind and wind "
-              "warning, plus the pressure trend. Leave out `day` to get all days.",
+              "Forecast for the selected point: per day temp min/max, mean pressure, max wind "
+              "(m/s and Beaufort) and wind warning, plus the pressure trend and outlook. "
+              "Leave out `day` to get all days.",
               {"day": day_param}),
         _spec("get_station_status",
-              "Status (OK/SUSPECT), data issues, distance and weight of the stations. "
-              "Leave out `station` to get all stations.",
+              "Status (OK/SUSPECT), data issues, distance to the selected point and weight of "
+              "the stations. Leave out `station` to get all stations.",
               {"station": _STATION_PARAM}),
-        _spec("get_warnings", "All warnings for the forecast period."),
+        _spec("get_warnings", "All warnings for the forecast period at the selected point."),
         _spec("sail_safety",
-              "Sailing verdict (safe / caution / not safe) for one day, decided by fixed rules "
-              "from wind (Beaufort) and pressure trend. Always use this for safety questions.",
+              "Sailing verdict (safe / caution / not safe) for one day at the selected point, "
+              "decided by fixed rules from wind (Beaufort) and pressure trend. "
+              "Always use this for safety questions.",
               {"day": day_param},
               ["day"]),
     ]

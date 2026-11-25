@@ -8,7 +8,8 @@ Flow for one question:
      results, and a sail_safety verdict must be repeated exactly. One retry, then
      UNRELIABLE_ANSWER.
 
-The sailing verdict is decided by tools.sail_safety(), never by the LLM.
+The sailing verdict is decided by tools._sail_safety(), never by the LLM.
+Everything works on the forecast of the selected point (tools.load_forecast_data).
 """
 import json
 import re
@@ -26,12 +27,8 @@ MAX_HISTORY = 6             # earlier messages the browser may send along
 OFF_TOPIC_ANSWER = "I can only answer about this forecast."
 UNRELIABLE_ANSWER = "Sorry, I couldn't produce a reliable answer."
 
-CHAT_TOOL_FUNCTIONS = {
-    "get_forecast": tools.get_forecast,
-    "get_station_status": tools.get_station_status,
-    "get_warnings": tools.get_warnings,
-    "sail_safety": tools.sail_safety,
-}
+# The chat's tools are built per question with tools.make_chat_tools(data), bound to the
+# forecast of the selected point (or the default sea point). All are read-only.
 
 # Step 1 of the gate (code): questions containing any of these words ALWAYS pass,
 # without asking the LLM. Only questions without them go to the LLM gate.
@@ -74,10 +71,12 @@ class NoForecast(Exception):
     """reports/forecast.json is missing or has no forecast."""
 
 
-def system_prompt(dates: list[str]) -> str:
+def system_prompt(dates: list[str], point: dict) -> str:
     days = ", ".join(f"{d} ({date.fromisoformat(d):%A})" for d in dates)
-    return f"""You answer short questions about a marine weather forecast for one point in
-Kiel Bay. The forecast covers: {days}. "Today" is {dates[0]}.
+    where = (f"the point selected on the map at {point['lat']:.2f}° N, {point['lon']:.2f}° E"
+             if point.get("id") == "POINT" else f"the sea point \"{point['name']}\"")
+    return f"""You answer short questions about a marine weather forecast for {where}
+in Kiel Bay. The forecast covers: {days}. "Today" is {dates[0]}.
 
 Rules:
 - Get every fact from the tools. Use only numbers that appear in tool results;
@@ -219,9 +218,10 @@ PRESSURE_TREND_TALK = re.compile(
     re.I)
 
 
-def pressure_problem(answer: str) -> str | None:
-    """If the answer talks about the pressure TREND, it must state the correct outlook."""
-    trend = tools.current_pressure_trend()
+def pressure_problem(answer: str, data: dict | None = None) -> str | None:
+    """If the answer talks about the pressure TREND, it must state the correct outlook
+    (for the selected point's forecast `data`; default: forecast.json)."""
+    trend = tools.current_pressure_trend(data)
     if not trend or not PRESSURE_TREND_TALK.search(answer):
         return None
     outlook = tools.pressure_outlook(trend)
@@ -235,9 +235,9 @@ def pressure_problem(answer: str) -> str | None:
 WEEKDAYS = ["monday", "tuesday", "wednesday", "thursday", "friday", "saturday", "sunday"]
 
 
-def days_asked(question: str) -> list[str]:
+def days_asked(question: str, data: dict | None = None) -> list[str]:
     """Forecast dates the question names ("today", "tomorrow", weekdays), mapped in code."""
-    dates = tools.forecast_dates()
+    dates = tools.forecast_dates(data)
     if not dates:
         return []
     text = question.lower()
@@ -253,20 +253,21 @@ def days_asked(question: str) -> list[str]:
     return list(dict.fromkeys(asked))
 
 
-def missing_safety_days(question: str, topic: str, safety: list[dict]) -> list[str]:
+def missing_safety_days(question: str, topic: str, safety: list[dict],
+                        data: dict | None = None) -> list[str]:
     """For safety questions: named days without a sail_safety verdict."""
     if not SAFETY_WORDS.search(topic):
         return []
     checked = {s["date"] for s in safety}
-    return [d for d in days_asked(question) if d not in checked]
+    return [d for d in days_asked(question, data) if d not in checked]
 
 
 def missing_tools(topic: str, tools_used: list[dict], safety: list[dict],
-                  question: str = "") -> list[str]:
+                  question: str = "", data: dict | None = None) -> list[str]:
     """Tools this kind of question requires but that were not (successfully) called."""
     called = {u["name"] for u in tools_used}
     missing = []
-    if SAFETY_WORDS.search(topic) and (not safety or missing_safety_days(question, topic, safety)):
+    if SAFETY_WORDS.search(topic) and (not safety or missing_safety_days(question, topic, safety, data)):
         missing.append("sail_safety")
     if STATION_WORDS.search(topic) and "get_station_status" not in called:
         missing.append("get_station_status")
@@ -276,7 +277,7 @@ def missing_tools(topic: str, tools_used: list[dict], safety: list[dict],
 
 
 def check_answer(answer: str, question: str, tools_used: list[dict], tool_results: list[str],
-                 safety: list[dict], topic: str = "") -> list[str]:
+                 safety: list[dict], topic: str = "", data: dict | None = None) -> list[str]:
     """Problems with a final answer, as messages for the LLM. Empty list = OK.
 
     `topic` is the question plus the previous question, so a follow-up like
@@ -287,14 +288,14 @@ def check_answer(answer: str, question: str, tools_used: list[dict], tool_result
     if OFF_TOPIC_ANSWER.lower().rstrip(".") in answer.lower():
         return ["this question IS about the forecast; answer it using the tools"]
     problems = []
-    missing = missing_tools(topic, tools_used, safety, question)
+    missing = missing_tools(topic, tools_used, safety, question, data)
     for name in missing:
         problems.append(f"this question needs {name}, but it was not called")
     unknown = sorted(_numbers(strip_dates(answer)) - allowed_numbers(tool_results, question))
     if unknown:
         shown = ", ".join(f"{x:g}" for x in unknown)
         problems.append(f"these numbers are not in any tool result: {shown}")
-    pressure = pressure_problem(answer)
+    pressure = pressure_problem(answer, data)
     if pressure:
         problems.append(pressure)
     for s in safety:
@@ -303,25 +304,35 @@ def check_answer(answer: str, question: str, tools_used: list[dict], tool_result
     return problems
 
 
-def answer_question(question: str, history: list[dict] | None = None) -> dict:
-    """Answer one chat question. Returns {answer, tools_used, safety, on_topic}."""
+def answer_question(question: str, history: list[dict] | None = None,
+                    point: dict | None = None) -> dict:
+    """Answer one chat question about the selected `point` ({lat, lon}; None = default
+    sea point). Returns {answer, tools_used, safety, on_topic, point}.
+    Raises NoForecast, or tools.OutsideForecastArea for a point outside the area."""
     history = without_refusals((history or [])[-MAX_HISTORY:])
-    dates = tools.forecast_dates()
+    try:
+        data = tools.load_forecast_data(point)     # forecast of THIS point, computed in code
+    except FileNotFoundError as exc:
+        raise NoForecast(str(exc)) from exc
+    dates = tools.forecast_dates(data)
     if not dates:
         raise NoForecast("No forecast yet. Run `python agent.py` first.")
+    functions = tools.make_chat_tools(data)         # tools bound to this point only
 
     if not is_on_topic(question, history):
-        return {"answer": OFF_TOPIC_ANSWER, "tools_used": [], "safety": [], "on_topic": False}
+        return {"answer": OFF_TOPIC_ANSWER, "tools_used": [], "safety": [], "on_topic": False,
+                "point": data["sea_point"]}
 
-    messages = [{"role": "system", "content": system_prompt(dates)}, *history,
+    messages = [{"role": "system", "content": system_prompt(dates, data["sea_point"])}, *history,
                 {"role": "user", "content": question}]
-    specs = tools.chat_tool_specs()
+    specs = tools.chat_tool_specs(data)
     topic = question_topic(question, history)
     tool_results, tools_used, safety = [], [], []
     retried = False
 
     def result(answer):
-        return {"answer": answer, "tools_used": tools_used, "safety": safety, "on_topic": True}
+        return {"answer": answer, "tools_used": tools_used, "safety": safety, "on_topic": True,
+                "point": data["sea_point"]}
 
     for _ in range(MAX_CHAT_STEPS):
         message = _llm(messages, tools=specs, max_tokens=agent.MAX_TOKENS).choices[0].message
@@ -333,7 +344,7 @@ def answer_question(question: str, history: list[dict] | None = None) -> dict:
                 for c in message.tool_calls]})
             for call in message.tool_calls:
                 name, args = call.function.name, call.function.arguments
-                output = agent.run_tool(name, args, CHAT_TOOL_FUNCTIONS)
+                output = agent.run_tool(name, args, functions)
                 messages.append({"role": "tool", "tool_call_id": call.id,
                                  "content": agent.wrap_as_data(name, output)})
                 tool_results.append(output)
@@ -344,7 +355,7 @@ def answer_question(question: str, history: list[dict] | None = None) -> dict:
             continue
 
         answer = (message.content or "").strip()
-        problems = check_answer(answer, question, tools_used, tool_results, safety, topic)
+        problems = check_answer(answer, question, tools_used, tool_results, safety, topic, data)
         if not problems:
             return result(answer)
         if retried:
@@ -353,10 +364,10 @@ def answer_question(question: str, history: list[dict] | None = None) -> dict:
         # The rejected answer is NOT added to the conversation (the model would just
         # repeat it). Ollama ignores tool_choice, so to force a missing tool we offer
         # ONLY that tool for the next call.
-        missing = missing_tools(topic, tools_used, safety, question)
+        missing = missing_tools(topic, tools_used, safety, question, data)
         if missing:
-            specs = [s for s in tools.chat_tool_specs() if s["function"]["name"] in missing]
-            days = missing_safety_days(question, topic, safety)
+            specs = [s for s in tools.chat_tool_specs(data) if s["function"]["name"] in missing]
+            days = missing_safety_days(question, topic, safety, data)
             what = f"for {', '.join(days)}" if days else f"for what the question asks about (today is {dates[0]})"
             note = (f"Do not answer yet. First call {' and '.join(missing)} {what}. "
                     "Then answer using only tool results.")

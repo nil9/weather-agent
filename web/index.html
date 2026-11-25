@@ -100,11 +100,18 @@
     text-shadow: 0 0 4px #000, 0 0 2px #000;
   }
   .leaflet-tooltip.label::before { display: none; }
-  .leaflet-tooltip.weight {
-    background: var(--panel); border: 1px solid var(--sea); color: var(--sea);
-    font-weight: 700; font-size: 11px; padding: 1px 6px; border-radius: 6px; box-shadow: none;
+  .leaflet-container { cursor: crosshair; }
+  .leaflet-interactive { cursor: pointer; }
+  .busy .leaflet-popup-content { margin: 8px 12px; color: var(--muted); }
+  .point-btn {
+    margin-top: 10px; background: var(--panel-2); color: var(--sea); border: 1px solid var(--line);
+    border-radius: 8px; padding: 5px 10px; font: inherit; font-size: 12px; cursor: pointer;
   }
-  .leaflet-tooltip.weight::before { display: none; }
+  .point-btn:hover { border-color: var(--sea); }
+  .hint { color: var(--muted); font-size: 12px; margin-top: 6px; }
+  .chat-point { color: var(--muted); font-size: 12px; margin-top: 8px; }
+  .msg.note { align-self: center; color: var(--muted); font-size: 12px; font-style: italic;
+              background: none; padding: 2px 0; }
 
   .sea-marker { position: relative; }
   .sea-marker .core {
@@ -190,6 +197,7 @@
     </section>
 
     <section id="view-chat" role="tabpanel" aria-labelledby="tab-chat" hidden>
+      <div class="chat-point" id="chat-point">Answering for: …</div>
       <div class="chat-log" id="chat-log" aria-live="polite">
         <div class="empty">Ask about the forecast, the stations or whether it's safe to sail.</div>
       </div>
@@ -253,11 +261,33 @@ const map = L.map("map", { zoomControl: true, attributionControl: true });
 L.tileLayer(TILE_PROVIDER.url, TILE_PROVIDER.options).addTo(map);
 map.setView([54.6, 10.5], 9);
 
-function stationPopup(s) {
+const MAX_POINT_DISTANCE_KM = 40;     // only for drawing the area; the server decides
+const areaLayer = L.layerGroup().addTo(map);    // 40 km circles, drawn once
+const pointLayer = L.layerGroup().addTo(map);   // stations, lines, point marker: redrawn per point
+
+let defaultData = null;               // reports/forecast.json (the agent's sea point)
+let currentData = null;               // what the map and panel show now
+let selectedPoint = null;             // null = default sea point, else {lat, lon}
+let labels = [];                      // [{el, prio}] for the overlap check
+
+const pct = w => `${(w * 100).toFixed(0)} %`;
+
+function pointName(data) {
+  const p = data.sea_point;
+  return data.selected ? `${p.lat.toFixed(2)}° N, ${p.lon.toFixed(2)}° E` : (p.name || "Sea point");
+}
+
+function stationLabel(s) {             // one label per station: name + weight (no line labels)
+  if (s.weight !== null) return `${s.id} · ${pct(s.weight)}`;
+  return `${s.id} · ${s.status === "SUSPECT" ? "excluded" : "unused"}`;
+}
+
+function stationPopup(s, data) {
   const box = el("div");
   box.append(el("div", "pop-title", `${s.id} · ${s.name || ""}`));
   box.append(el("div", null, `Status: ${s.status}`));
-  box.append(el("div", "pop-row", `${s.distance_km} km to the sea point`));
+  box.append(el("div", "pop-row",
+    `${s.distance_km} km to the ${data.selected ? "selected point" : "sea point"}`));
   box.append(el("div", "pop-row", s.weight !== null
     ? `Weight in forecast: ${(s.weight * 100).toFixed(1)} %`
     : "Not used in the forecast"));
@@ -271,7 +301,7 @@ function stationPopup(s) {
 
 function seaPopup(data) {
   const box = el("div");
-  box.append(el("div", "pop-title", data.sea_point.name || "Sea point"));
+  box.append(el("div", "pop-title", pointName(data)));
   if (!data.forecast) {
     box.append(el("div", "error", "No forecast available"));
     return box;
@@ -283,38 +313,112 @@ function seaPopup(data) {
   return box;
 }
 
-function drawMap(data) {
-  const sea = [data.sea_point.lat, data.sea_point.lon];
-  const bounds = [sea];
+function addLabel(layer, text, options, prio) {
+  layer.bindTooltip(text, { permanent: true, className: "label", ...options });
+  layer.addTo(pointLayer);
+  labels.push({ el: layer.getTooltip().getElement(), prio });
+}
 
-  // Dashed lines first, so the markers are drawn on top of them.
-  data.stations.filter(s => s.weight !== null).forEach(s => {
+function drawArea(data) {                // where clicking works: 40 km around each OK station
+  data.stations.filter(s => s.status === "OK").forEach(s => {
+    L.circle([s.lat, s.lon], {
+      radius: MAX_POINT_DISTANCE_KM * 1000, interactive: false,
+      color: "#4cc9f0", weight: 1, opacity: 0.25, dashArray: "3 6", fillOpacity: 0.03,
+    }).addTo(areaLayer);
+  });
+}
+
+function drawMap(data, fit) {
+  pointLayer.clearLayers();
+  labels = [];
+  const sea = [data.sea_point.lat, data.sea_point.lon];
+
+  // Dashed lines first, so the markers are drawn on top. Thickness = weight.
+  data.stations.filter(s => s.weight).forEach(s => {
     L.polyline([[s.lat, s.lon], sea], {
-      color: "#4cc9f0", weight: 1.5 + 5 * s.weight, opacity: 0.75, dashArray: "6 8",
-    }).addTo(map).bindTooltip(`${(s.weight * 100).toFixed(0)} %`,
-      { permanent: true, direction: "center", className: "weight" });
+      color: "#4cc9f0", weight: 1.5 + 5 * s.weight, opacity: 0.75, dashArray: "6 8", interactive: false,
+    }).addTo(pointLayer);
   });
 
   data.stations.forEach(s => {
-    const ok = s.status === "OK";
-    L.circleMarker([s.lat, s.lon], {
+    const marker = L.circleMarker([s.lat, s.lon], {
       radius: 9, color: "#07131d", weight: 2,
-      fillColor: ok ? "#3ddc97" : "#ff5d5d", fillOpacity: 1,
-    }).addTo(map)
-      .bindPopup(stationPopup(s))
-      .bindTooltip(s.id, { permanent: true, direction: "right", offset: [10, 0], className: "label" });
-    bounds.push([s.lat, s.lon]);
+      fillColor: s.status === "OK" ? "#3ddc97" : "#ff5d5d", fillOpacity: 1,
+    }).bindPopup(stationPopup(s, data));
+    addLabel(marker, stationLabel(s), { direction: "right", offset: [10, 0] }, 10 + (s.weight || 0));
   });
 
   const seaIcon = L.divIcon({
     className: "sea-marker", iconSize: [28, 28], iconAnchor: [14, 14],
     html: '<div class="ring"></div><div class="core"></div>',
   });
-  L.marker(sea, { icon: seaIcon, title: "Sea forecast point", keyboard: true }).addTo(map)
-    .bindPopup(seaPopup(data))
-    .bindTooltip("SEA", { permanent: true, direction: "right", offset: [14, 0], className: "label" });
+  const seaMarker = L.marker(sea, { icon: seaIcon, title: "Forecast point", keyboard: true })
+    .bindPopup(seaPopup(data));
+  addLabel(seaMarker, data.selected ? "POINT" : "SEA", { direction: "right", offset: [14, 0] }, 100);
 
-  map.fitBounds(bounds, { padding: [40, 40] });
+  if (fit) {
+    map.fitBounds([sea, ...data.stations.map(s => [s.lat, s.lon])], { padding: [40, 40] });
+  }
+  declutter();
+}
+
+// Overlap check: after every draw, zoom and pan, hide a label that would overlap one with
+// higher priority (forecast point > stations with more weight > the rest).
+function declutter() {
+  const placed = [];
+  [...labels].sort((a, b) => b.prio - a.prio).forEach(({ el: label }) => {
+    if (!label) return;
+    label.style.visibility = "visible";
+    const r = label.getBoundingClientRect();
+    const hit = placed.some(p => r.left < p.right && r.right > p.left && r.top < p.bottom && r.bottom > p.top);
+    if (hit) label.style.visibility = "hidden";
+    else placed.push(r);
+  });
+}
+map.on("zoomend moveend", declutter);
+
+function show(data, fit = false) {
+  currentData = data;
+  drawMap(data, fit);
+  drawPanel(data);
+}
+
+// ---------------------------------------------------------------- click: forecast at a point
+// Clicking the map only to close an open popup should not move the point.
+// (Our own "Computing…" / "Outside forecast area" notes don't count: clicking again
+// right away should pick a new point.)
+let openPopups = 0, ignoreClick = false;
+const counts = e => e.popup.options.className !== "busy";
+map.on("popupopen", e => { if (counts(e)) openPopups++; });
+map.on("popupclose", e => { if (counts(e)) openPopups = Math.max(0, openPopups - 1); });
+map.on("preclick", () => { ignoreClick = openPopups > 0; });
+map.on("click", e => { if (!ignoreClick) selectPoint(e.latlng.wrap()); });
+
+async function selectPoint(latlng) {
+  if (!defaultData) return;
+  const note = L.popup({ closeButton: false, className: "busy" })
+    .setLatLng(latlng).setContent("Computing…").openOn(map);
+  try {
+    const r = await fetch(`/api/forecast_at?lat=${latlng.lat.toFixed(4)}&lon=${latlng.lng.toFixed(4)}`);
+    const body = await r.json();
+    if (!r.ok) {
+      const msg = el("div", "error", r.status === 400 ? body.detail : "Error: " + (body.detail || r.statusText));
+      note.setContent(msg);
+      return;                           // the previous point stays selected
+    }
+    map.closePopup(note);
+    selectedPoint = { lat: body.sea_point.lat, lon: body.sea_point.lon };
+    show(body);
+    pointChanged();
+  } catch (err) {
+    note.setContent(el("div", "error", "Error: " + err.message));
+  }
+}
+
+function resetPoint() {
+  selectedPoint = null;
+  show(defaultData);
+  pointChanged();
 }
 
 // ---------------------------------------------------------------- panel
@@ -322,8 +426,17 @@ function drawPanel(data) {
   const panel = document.getElementById("view-forecast");
   panel.replaceChildren();
   const sp = data.sea_point;
-  panel.append(el("div", "sub",
-    `${sp.name || "Sea point"} · ${sp.lat.toFixed(2)}° N, ${sp.lon.toFixed(2)}° E`));
+  panel.append(el("div", "sub", data.selected
+    ? `Selected point · ${sp.lat.toFixed(2)}° N, ${sp.lon.toFixed(2)}° E`
+    : `${sp.name || "Sea point"} · ${sp.lat.toFixed(2)}° N, ${sp.lon.toFixed(2)}° E`));
+  if (data.selected) {
+    const back = el("button", "point-btn", "← Back to default sea point");
+    back.type = "button";
+    back.addEventListener("click", resetPoint);
+    panel.append(back);
+  } else {
+    panel.append(el("div", "hint", "Click the map to get the forecast for another point."));
+  }
 
   const f = data.forecast;
   if (!f) {
@@ -387,7 +500,12 @@ fetch("/api/forecast")
     if (!r.ok) throw new Error(body.detail || r.statusText);
     return body;
   })
-  .then(data => { drawMap(data); drawPanel(data); })
+  .then(data => {
+    defaultData = data;
+    drawArea(data);
+    show(data, true);
+    pointChanged();
+  })
   .catch(err => {
     document.getElementById("view-forecast").replaceChildren(
       el("div", "error", "Could not load the forecast: " + err.message));
@@ -445,7 +563,7 @@ async function ask(question) {
     const r = await fetch("/api/chat", {
       method: "POST",
       headers: { "Content-Type": "application/json" },
-      body: JSON.stringify({ question, history: chatHistory.slice(-MAX_HISTORY) }),
+      body: JSON.stringify({ question, history: chatHistory.slice(-MAX_HISTORY), point: selectedPoint }),
     });
     const body = await r.json();
     if (!r.ok) {
@@ -472,6 +590,17 @@ async function ask(question) {
     busy = false;
     chatInput.disabled = chatSend.disabled = false;
     chatInput.focus();
+  }
+}
+
+// When the selected point changes, earlier answers are about another place:
+// clear the history (so follow-ups don't mix points) and say so in the log.
+function pointChanged() {
+  const name = currentData ? pointName(currentData) : "…";
+  document.getElementById("chat-point").textContent = "Answering for: " + name;
+  if (chatHistory.length) {
+    chatHistory.length = 0;
+    addMessage("note", "Now answering for " + name + ".");
   }
 }
 

@@ -24,7 +24,9 @@ Python tools do every calculation. The local LLM only picks which tools to call 
 
 | 11 | Chat fixes: keyword pre-gate (code), "if in doubt YES", pressure outlook (rising = improving), stricter number check, day mapping; 22 regression questions | ✅ Done |
 
-*Last updated: end of step 11 (chat fixes).*
+| 12 | Dynamic forecast point: click → `GET /api/forecast_at` (same weighting as the agent, no LLM, cache per agent run, 40 km limit); chat answers for the selected point; one label per station | ✅ Done |
+
+*Last updated: end of step 12 (dynamic point).*
 
 `experiments.py` doesn't change the diagrams. It imports `agent.py`, swaps the task, the system prompt
 or entries in `agent.TOOL_FUNCTIONS`, and redirects `write_report` to `reports/experiment_<scenario>.md`.
@@ -55,6 +57,8 @@ flowchart LR
     reports -->|"forecast.json (read only)"| app
     web --> app
     app -->|"GET / and GET /api/forecast"| browser
+    browser -->|"click: GET /api/forecast_at"| app
+    app -->|"forecast_at(lat, lon)<br/>(code only, cached)"| tools
     browser -->|"POST /api/chat"| app
     app --> chat
     chat -->|"gate + chat loop"| llm
@@ -192,3 +196,33 @@ sequenceDiagram
 | Verdict check | The answer must repeat each `sail_safety` verdict exactly |
 | Forced retry | Ollama ignores `tool_choice`, so the retry offers **only** the missing tool, and the rejected answer is dropped |
 | Safe UI | LLM text is shown with `textContent` (never HTML); verdict badges come from `safety`, not from the text |
+
+## 4. Clicking a point on the map (sequence)
+
+```mermaid
+sequenceDiagram
+    actor U as Browser
+    participant P as app.py
+    participant T as tools.py
+
+    U->>P: click → GET /api/forecast_at?lat=..&lon=..
+    P->>T: forecast_at(lat, lon)
+    T->>T: OK stations of the last agent run (forecast.json)
+    alt nearest OK station > 40 km
+        T-->>U: 400 "Outside forecast area" (previous point stays selected)
+    else inside
+        T->>T: station forecasts from cache<br/>(Holt-Winters once per agent run)
+        T->>T: _idw_weights + _combine_daily<br/>(the same functions estimate_at_sea_point uses)
+        T-->>U: same shape as forecast.json
+        U->>U: move marker, redraw lines + labels, update panel,<br/>clear chat history, chat now uses this point
+    end
+```
+
+- **One weighting logic:** `estimate_at_sea_point` (agent) and `forecast_at` (map) both call
+  `_idw_weights` and `_combine_daily`. `test_tools.py` checks that both give identical numbers
+  at the sea point.
+- **No LLM** for a click. The chat gets the point with each question; `chat.py` builds its tools
+  per request with `tools.make_chat_tools(data)`, bound to that point's forecast.
+- **Labels:** one label per station ("SOUTH · 69 %", "EAST · excluded"). A small overlap check
+  (on draw, zoom and pan) hides lower-priority labels; the forecast point's label always wins.
+- **Limit:** no land/sea mask, so points on land within 40 km also get a forecast.

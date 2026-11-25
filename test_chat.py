@@ -77,6 +77,19 @@ def safety_ok(day):
     return check
 
 
+def names_stations(*ids):
+    """Each station must be named, by id (SOUTH) or by place (Schönberger Strand)."""
+    names = {s["id"]: s["name"] for s in json.loads(tools.get_station_status())["stations"]}
+    def check(r):
+        ok, reason = answered(r)
+        if not ok:
+            return ok, reason
+        text = r["answer"].lower()
+        missing = [i for i in ids if i.lower() not in text and names[i].split(" (")[0].lower() not in text]
+        return (not missing), ("names " + ", ".join(ids) if not missing else f"missing {missing}")
+    return check
+
+
 def refused(r):
     ok = r["answer"] == REFUSAL and not r["tools_used"]
     return ok, "refused, no tools" if ok else f"not refused: {r['answer'][:70]}"
@@ -121,7 +134,7 @@ NORMAL = [
     ("Are there any warnings?", contains("gale")),
     ("How windy is it today?", contains(str(daily(TODAY)["wind_max_ms"]))),
     ("What's the highest temperature in the next three days?", answered),
-    ("Which stations are used for the forecast?", contains("NORTH", "SOUTH", "WEST")),
+    ("Which stations are used for the forecast?", names_stations("NORTH", "SOUTH", "WEST")),
     ("How far is station SOUTH from the sea point?", contains("14.7")),
     ("Can I take my small boat out today?", safety_ok(TODAY)),
 ]
@@ -139,12 +152,46 @@ OFF_TOPIC = [
 ]
 CASES += [("off-topic", q, [], refused) for q in OFF_TOPIC]
 
+# A clicked map point (near WEST). Expected values come from the code for THAT point.
+POINT = {"lat": 54.57, "lon": 10.12}
+POINT_DATA = tools.forecast_at(POINT["lat"], POINT["lon"]) if DATES else None
+
+
+def point_safety_ok(day):
+    def check(r):
+        expected = json.loads(tools.make_chat_tools(POINT_DATA)["sail_safety"](day))["verdict"]
+        got = {s["date"]: s["verdict"] for s in r["safety"]}
+        if r["point"]["lat"] != POINT["lat"]:
+            return False, f"answered for the wrong point: {r['point']}"
+        if got.get(day) != expected or not chat.verdict_in(r["answer"], expected):
+            return False, f"expected '{expected}' for {day} at the point, got {got}"
+        return True, f"{day} at point: {expected}"
+    return check
+
+
+def point_contains_wind(day_index):
+    def check(r):
+        value = str(POINT_DATA["forecast"]["daily"][day_index]["wind_max_ms"])
+        default = str(daily(DATES[day_index])["wind_max_ms"])
+        if value not in r["answer"]:
+            return False, f"missing the point's wind {value} (default point has {default})"
+        return True, f"point wind {value} (default point: {default})"
+    return check
+
+
+if POINT_DATA:
+    CASES += [
+        ("point", "Is it safe to sail tomorrow?", [], point_safety_ok(TOMORROW), POINT),
+        ("point", "Max wind on Friday?", [], point_contains_wind(2), POINT),
+        ("point", "How windy is it today?", [], point_contains_wind(0), POINT),
+    ]
+
 
 def test_keyword_gate() -> int:
     """Part 1: no LLM involved."""
     print("Part 1: keyword gate (code only)")
     failures = 0
-    for group, question, _, _ in CASES:
+    for group, question, *_ in CASES:
         if question.startswith(("and ", "Ignore")):
             continue            # follow-up / manipulation: not about keywords
         expected = group != "off-topic"
@@ -167,10 +214,10 @@ def main():
 
     print("Part 2: chat answers (LLM)")
     results = {}
-    for group, question, history, check in CASES:
+    for group, question, history, check, *point in CASES:
         for _ in range(args.runs):
             start = time.time()
-            r = chat.answer_question(question, history)
+            r = chat.answer_question(question, history, point[0] if point else None)
             ok, reason = check(r)
             results.setdefault(group, []).append(ok)
             context = "  [after previous question]" if history else ""

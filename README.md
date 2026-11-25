@@ -43,8 +43,10 @@ A run takes about 20–60 seconds on a local GPU.
 
 The map shows the stations (green = OK, red = SUSPECT; click one for details), the sea point with
 the 3-day forecast and warning badges, and dashed lines weighted by each station's share of the
-forecast. It needs an internet connection for the map tiles and the Leaflet library. The server
-only listens on localhost.
+forecast. **Click anywhere** inside the dashed 40 km circles to get the forecast for that
+point. It is computed in code with the same weighting as the agent, without the LLM. The chat
+then answers for that point. It needs an internet connection for the map tiles and the Leaflet
+library. The server only listens on localhost.
 
 The **Ask** tab is a chat about this forecast, e.g. "Is it safe to sail tomorrow?" or "Why is EAST
 excluded?". The LLM only has read-only tools. Whether sailing is safe / caution / not safe is
@@ -60,9 +62,9 @@ navigation advice. Run `python test_chat.py` to check the chat against a fixed s
 | `tools.py` | The 6 tools (stations, observations, data quality, Holt-Winters forecast, sea-point estimate, write report) and their JSON specs |
 | `agent.py` | The agent loop: LLM → tool call → result → LLM … → final answer |
 | `test_tools.py` | Calls each tool once and prints the result |
-| `app.py` | Small FastAPI server (localhost only): the map page at `/`, the forecast JSON at `/api/forecast`, the chat at `POST /api/chat` |
+| `app.py` | Small FastAPI server (localhost only): the map page at `/`, the forecast JSON at `/api/forecast`, a clicked point at `/api/forecast_at`, the chat at `POST /api/chat` |
 | `chat.py` | Chat logic: topic gate, read-only tool loop, answer checks (numbers, verdicts, required tools) |
-| `test_chat.py` | Chat regression tests: all suggestion chips, 12 normal questions, 5 off-topic questions; answers checked against the tools (`--runs N`) |
+| `test_chat.py` | Chat regression tests: all suggestion chips, 12 normal questions, 5 off-topic questions, 3 questions for a clicked point; answers checked against the tools (`--runs N`) |
 | `web/index.html` | The map page: Leaflet + OpenStreetMap tiles with a dark CSS filter (no API key), Forecast / Ask tabs |
 | `experiments.py` | Runs the agent in "break" scenarios with pass/fail checks: `python experiments.py <scenario>` or `python experiments.py all --runs 5` |
 | `docs/architecture.md` | Diagrams and build progress |
