@@ -15,16 +15,13 @@ Python tools do every calculation. The local LLM only picks which tools to call 
 | 3d | `agent.py`: readable trace (tool, args, shortened result) | ✅ Done |
 | 3+ | `tools.py`: `estimate_at_sea_point` returns `pressure_trend` + Beaufort `warnings` | ✅ Done |
 | 4 | `experiments.py`: 6 "break" scenarios via runtime patching (agent/tools unchanged) | ✅ Done |
-
 | 5 | Guardrails in code: tools refuse SUSPECT stations, error instead of numbers, results wrapped as data, final answer needs a saved report, stop after 3 identical tool failures | ✅ Done |
-
 | 6 | Task validated before the loop; `write_report` checks the report against the last estimate; `experiments.py --runs N` with pass/fail | ✅ Done |
-
 | 7 | `agent.TEMPERATURE` setting; `experiments.py --temperature` | ✅ Done |
-
 | 8 | `MAX_STEPS = 20`; `max_tokens` and a timeout on each LLM call (no silent SDK retries) | ✅ Done |
+| 9 | Map: real Kiel Bay coordinates, `reports/forecast.json`, `app.py` (FastAPI, localhost), `web/index.html` (Leaflet) | ✅ Done |
 
-*Last updated: end of step 8.*
+*Last updated: end of step 9 (map).*
 
 `experiments.py` doesn't change the diagrams. It imports `agent.py`, swaps the task, the system prompt
 or entries in `agent.TOOL_FUNCTIONS`, and redirects `write_report` to `reports/experiment_<scenario>.md`.
@@ -38,7 +35,10 @@ flowchart LR
     tools["tools.py<br/>6 tools + TOOL_SPECS<br/>(all calculations)"]
     agent["agent.py<br/>chat + tool-calling loop"]
     llm["Ollama LLM<br/>qwen2.5:7b<br/>localhost:11434/v1"]
-    reports[("reports/<br/>*.md")]
+    reports[("reports/<br/>*.md, forecast.json")]
+    app["app.py<br/>FastAPI, 127.0.0.1:8000"]
+    web["web/index.html<br/>Leaflet + CARTO Dark Matter"]
+    browser(["Browser"])
 
     gen -->|writes| data
     data -->|read only| tools
@@ -47,10 +47,14 @@ flowchart LR
     agent -->|"messages + TOOL_SPECS"| llm
     llm -->|"tool_calls or final text"| agent
     tools -->|"write_report (path-checked)"| reports
+    agent -->|"main(): save_forecast_json()"| tools
+    reports -->|"forecast.json (read only)"| app
+    web --> app
+    app -->|"GET / and GET /api/forecast"| browser
 
     classDef done fill:#d4edda,stroke:#28a745,color:#155724
     classDef todo fill:#f1f3f5,stroke:#adb5bd,color:#495057,stroke-dasharray: 5 5
-    class gen,data,tools,reports,agent,llm done
+    class gen,data,tools,reports,agent,llm,app,web done
 ```
 
 **Legend:** green = done, grey dashed = not built yet.
@@ -62,6 +66,10 @@ Notes:
 - The Ollama model itself isn't part of this repo. It counts as done because `agent.py` now uses it.
 - Interpretations such as the pressure trend and wind warnings are worked out in `tools.py`,
   not by the LLM. In an early run the LLM called a rising pressure "falling".
+- `reports/forecast.json` is built by `tools.save_forecast_json()` from tool results only (never LLM text).
+  `agent.py` calls it in `main()` after a successful run; experiments never write it.
+- The map page calculates nothing; it only displays `/api/forecast`. `app.py` binds to 127.0.0.1 only.
+- Stations sit on the real Kiel Bay coast (Marstal, Fehmarn, Schönberger Strand, Damp); the weather data is synthetic.
 
 ## 2. One agent run (sequence)
 

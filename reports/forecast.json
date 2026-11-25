@@ -1,0 +1,100 @@
+{
+  "generated_at": "2026-11-25T13:23:21Z",
+  "sea_point": {
+    "id": "SEA",
+    "name": "Kiel Bay (open water)",
+    "lat": 54.55,
+    "lon": 10.45
+  },
+  "stations": [
+    {
+      "id": "NORTH",
+      "name": "Marstal (Ærø)",
+      "lat": 54.856,
+      "lon": 10.517,
+      "distance_km": 34.3,
+      "status": "OK",
+      "issues": [],
+      "weight": 0.126
+    },
+    {
+      "id": "EAST",
+      "name": "Westermarkelsdorf (Fehmarn)",
+      "lat": 54.528,
+      "lon": 11.06,
+      "distance_km": 39.4,
+      "status": "SUSPECT",
+      "issues": [
+        "temperature_c stuck at 7.4 for 216 h (from 2026-11-16 00:00)",
+        "pressure_hpa: 12 single-hour jumps > 5.0 (largest 41.2)"
+      ],
+      "weight": null
+    },
+    {
+      "id": "SOUTH",
+      "name": "Schönberger Strand",
+      "lat": 54.425,
+      "lon": 10.378,
+      "distance_km": 14.7,
+      "status": "OK",
+      "issues": [],
+      "weight": 0.688
+    },
+    {
+      "id": "WEST",
+      "name": "Damp",
+      "lat": 54.586,
+      "lon": 10.017,
+      "distance_km": 28.2,
+      "status": "OK",
+      "issues": [],
+      "weight": 0.186
+    }
+  ],
+  "forecast": {
+    "daily": [
+      {
+        "date": "2026-11-25",
+        "temp_min_c": 6.1,
+        "temp_max_c": 12.4,
+        "pressure_mean_hpa": 1003.4,
+        "wind_max_ms": 15.0,
+        "wind_warning": "NEAR GALE (Beaufort 7, max 15.0 m/s)"
+      },
+      {
+        "date": "2026-11-26",
+        "temp_min_c": 6.2,
+        "temp_max_c": 12.4,
+        "pressure_mean_hpa": 1008.1,
+        "wind_max_ms": 13.6,
+        "wind_warning": "STRONG WIND (Beaufort 6, max 13.6 m/s)"
+      },
+      {
+        "date": "2026-11-27",
+        "temp_min_c": 6.2,
+        "temp_max_c": 12.4,
+        "pressure_mean_hpa": 1008.5,
+        "wind_max_ms": 13.5,
+        "wind_warning": "STRONG WIND (Beaufort 6, max 13.5 m/s)"
+      }
+    ],
+    "pressure_trend": {
+      "label": "rising",
+      "change_hpa": 5.1,
+      "from_hpa": 1003.4,
+      "to_hpa": 1008.5
+    },
+    "warnings": [
+      "2026-11-25: NEAR GALE (Beaufort 7, max 15.0 m/s)",
+      "2026-11-26: STRONG WIND (Beaufort 6, max 13.6 m/s)",
+      "2026-11-27: STRONG WIND (Beaufort 6, max 13.5 m/s)"
+    ],
+    "stations_used": [
+      "NORTH",
+      "SOUTH",
+      "WEST"
+    ]
+  },
+  "unavailable_reason": null,
+  "report": "reports/forecast_report.md"
+}

@@ -2,28 +2,33 @@
   "stations": [
     {
       "id": "NORTH",
-      "lat": 54.6,
-      "lon": 10.05
+      "name": "Marstal (\u00c6r\u00f8)",
+      "lat": 54.856,
+      "lon": 10.517
     },
     {
       "id": "EAST",
-      "lat": 54.45,
-      "lon": 10.3
+      "name": "Westermarkelsdorf (Fehmarn)",
+      "lat": 54.528,
+      "lon": 11.06
     },
     {
       "id": "SOUTH",
-      "lat": 54.3,
-      "lon": 10.05
+      "name": "Sch\u00f6nberger Strand",
+      "lat": 54.425,
+      "lon": 10.378
     },
     {
       "id": "WEST",
-      "lat": 54.45,
-      "lon": 9.8
+      "name": "Damp",
+      "lat": 54.586,
+      "lon": 10.017
     }
   ],
   "forecast_point": {
     "id": "SEA",
-    "lat": 54.45,
-    "lon": 10.05
+    "name": "Kiel Bay (open water)",
+    "lat": 54.55,
+    "lon": 10.45
   }
 }

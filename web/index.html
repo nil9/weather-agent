@@ -1,0 +1,332 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Kiel Bay Forecast</title>
+<link rel="stylesheet" href="https://cdnjs.cloudflare.com/ajax/libs/leaflet/1.9.4/leaflet.min.css">
+<style>
+  :root {
+    --bg: #07131d;
+    --panel: #0d1e2b;
+    --panel-2: #12283a;
+    --line: #1f3a50;
+    --text: #e3eef6;
+    --muted: #8aa4b8;
+    --sea: #4cc9f0;
+    --ok: #3ddc97;
+    --bad: #ff5d5d;
+    --yellow: #ffd166;
+    --orange: #ff9f43;
+    --red: #ff5d5d;
+  }
+  * { box-sizing: border-box; }
+  html, body { margin: 0; height: 100%; }
+  body {
+    background: var(--bg);
+    color: var(--text);
+    font: 14px/1.45 system-ui, -apple-system, "Segoe UI", Roboto, sans-serif;
+  }
+  .app { display: grid; grid-template-columns: 1fr 380px; height: 100vh; }
+  #map { height: 100%; background: var(--bg); }
+  /* Dark map from light OSM tiles. Only the tile layer gets this class, so
+     markers, lines, labels and popups keep their real colours. */
+  .dark-tiles { filter: invert(1) hue-rotate(180deg) brightness(0.9) contrast(0.9) saturate(0.6); }
+
+  /* Side panel */
+  .panel {
+    background: var(--panel);
+    border-left: 1px solid var(--line);
+    overflow-y: auto;
+    padding: 20px 18px 28px;
+  }
+  h1 { font-size: 18px; margin: 0; letter-spacing: .2px; }
+  h2 {
+    font-size: 11px; font-weight: 600; text-transform: uppercase; letter-spacing: 1.2px;
+    color: var(--muted); margin: 22px 0 8px;
+  }
+  .sub { color: var(--muted); font-size: 12px; margin-top: 2px; }
+  .pill {
+    display: inline-flex; align-items: center; gap: 6px;
+    padding: 3px 10px; border-radius: 999px; font-size: 12px; font-weight: 600;
+    background: var(--panel-2); border: 1px solid var(--line);
+  }
+  .badges { display: flex; flex-wrap: wrap; gap: 6px; margin-top: 10px; }
+  .badge {
+    padding: 2px 8px; border-radius: 6px; font-size: 11px; font-weight: 700;
+    letter-spacing: .3px; color: #111;
+  }
+  .badge.yellow { background: var(--yellow); }
+  .badge.orange { background: var(--orange); }
+  .badge.red    { background: var(--red); color: #fff; }
+
+  .day {
+    display: grid; grid-template-columns: 74px 1fr; gap: 4px 12px;
+    background: var(--panel-2); border: 1px solid var(--line); border-radius: 10px;
+    padding: 10px 12px; margin-bottom: 8px;
+  }
+  .day .date { font-weight: 700; grid-row: span 2; align-self: center; }
+  .day .vals { display: flex; justify-content: space-between; gap: 8px; }
+  .day .vals span { white-space: nowrap; }
+  .day .unit { color: var(--muted); font-size: 12px; }
+
+  .station {
+    display: grid; grid-template-columns: 12px 1fr auto; gap: 4px 10px; align-items: center;
+    padding: 8px 0; border-bottom: 1px solid var(--line);
+  }
+  .station:last-child { border-bottom: 0; }
+  .dot { width: 10px; height: 10px; border-radius: 50%; }
+  .dot.ok { background: var(--ok); } .dot.bad { background: var(--bad); }
+  .station .meta { color: var(--muted); font-size: 12px; grid-column: 2 / 4; }
+  .station .w { font-weight: 700; color: var(--sea); }
+  .station .w.ex { color: var(--bad); font-weight: 600; font-size: 12px; }
+
+  .note { color: var(--muted); font-size: 12px; margin-top: 20px; }
+  .error { color: var(--bad); }
+
+  /* Map: popups, labels, sea-point marker */
+  .leaflet-popup-content-wrapper, .leaflet-popup-tip {
+    background: var(--panel); color: var(--text); border: 1px solid var(--line);
+  }
+  .leaflet-popup-content { margin: 12px 14px; font-size: 13px; }
+  .leaflet-container a.leaflet-popup-close-button { color: var(--muted); }
+  .pop-title { font-weight: 700; font-size: 14px; }
+  .pop-row { color: var(--muted); }
+  .pop-issues { margin: 6px 0 0; padding-left: 16px; color: var(--bad); }
+
+  .leaflet-tooltip.label {
+    background: transparent; border: 0; box-shadow: none;
+    color: var(--text); font-weight: 700; font-size: 11px; letter-spacing: .5px;
+    text-shadow: 0 0 4px #000, 0 0 2px #000;
+  }
+  .leaflet-tooltip.label::before { display: none; }
+  .leaflet-tooltip.weight {
+    background: var(--panel); border: 1px solid var(--sea); color: var(--sea);
+    font-weight: 700; font-size: 11px; padding: 1px 6px; border-radius: 6px; box-shadow: none;
+  }
+  .leaflet-tooltip.weight::before { display: none; }
+
+  .sea-marker { position: relative; }
+  .sea-marker .core {
+    position: absolute; inset: 7px; border-radius: 50%;
+    background: var(--sea); box-shadow: 0 0 12px var(--sea);
+  }
+  .sea-marker .ring {
+    position: absolute; inset: 0; border-radius: 50%; border: 2px solid var(--sea);
+    animation: pulse 2s ease-out infinite;
+  }
+  @keyframes pulse {
+    from { transform: scale(.6); opacity: 1; }
+    to   { transform: scale(1.8); opacity: 0; }
+  }
+  @media (prefers-reduced-motion: reduce) { .sea-marker .ring { animation: none; } }
+
+  /* Phones: map on top, panel below */
+  @media (max-width: 760px) {
+    .app { grid-template-columns: 1fr; grid-template-rows: 55vh auto; height: auto; }
+    .panel { border-left: 0; border-top: 1px solid var(--line); padding: 16px; }
+  }
+</style>
+</head>
+<body>
+<div class="app">
+  <div id="map" role="region" aria-label="Map of Kiel Bay with weather stations"></div>
+  <aside class="panel" id="panel">
+    <h1>Kiel Bay marine forecast</h1>
+    <div class="sub">Loading…</div>
+  </aside>
+</div>
+
+<script src="https://cdnjs.cloudflare.com/ajax/libs/leaflet/1.9.4/leaflet.min.js"></script>
+<script>
+// The page only DISPLAYS /api/forecast. All numbers were computed by the Python tools.
+
+// Build DOM elements safely: text is always inserted as text, never as HTML.
+function el(tag, className, text) {
+  const node = document.createElement(tag);
+  if (className) node.className = className;
+  if (text !== undefined && text !== null) node.textContent = text;
+  return node;
+}
+
+function warningColor(warning) {
+  if (!warning) return null;
+  if (warning.startsWith("NEAR GALE")) return "orange";
+  if (warning.startsWith("GALE") || warning.startsWith("STORM")) return "red";
+  return "yellow";                                  // STRONG WIND
+}
+
+function shortWarning(warning) {                    // "NEAR GALE (Beaufort 7, ...)" -> "NEAR GALE · Bft 7"
+  const m = warning.match(/^(.*?) \(Beaufort (\d+)/);
+  return m ? `${m[1]} · Bft ${m[2]}` : warning;
+}
+
+function formatDate(iso) {
+  return new Date(iso + "T00:00:00Z").toLocaleDateString("en-GB",
+    { weekday: "short", day: "numeric", month: "short", timeZone: "UTC" });
+}
+
+const TREND_ARROW = { rising: "↗", falling: "↘", steady: "→" };
+
+// ---------------------------------------------------------------- map tiles
+// Swap the map provider here. `className: "dark-tiles"` applies the dark CSS
+// filter (see <style>) to the tile layer only. Remove it for providers that are
+// already dark.
+const TILE_PROVIDER = {
+  url: "https://tile.openstreetmap.org/{z}/{x}/{y}.png",
+  options: {
+    maxZoom: 19,
+    className: "dark-tiles",
+    attribution: '&copy; <a href="https://www.openstreetmap.org/copyright">OpenStreetMap</a> contributors',
+  },
+};
+
+// ---------------------------------------------------------------- map
+const map = L.map("map", { zoomControl: true, attributionControl: true });
+L.tileLayer(TILE_PROVIDER.url, TILE_PROVIDER.options).addTo(map);
+map.setView([54.6, 10.5], 9);
+
+function stationPopup(s) {
+  const box = el("div");
+  box.append(el("div", "pop-title", `${s.id} · ${s.name || ""}`));
+  box.append(el("div", null, `Status: ${s.status}`));
+  box.append(el("div", "pop-row", `${s.distance_km} km to the sea point`));
+  box.append(el("div", "pop-row", s.weight !== null
+    ? `Weight in forecast: ${(s.weight * 100).toFixed(1)} %`
+    : "Not used in the forecast"));
+  if (s.issues.length) {
+    const ul = el("ul", "pop-issues");
+    s.issues.forEach(issue => ul.append(el("li", null, issue)));
+    box.append(ul);
+  }
+  return box;
+}
+
+function seaPopup(data) {
+  const box = el("div");
+  box.append(el("div", "pop-title", data.sea_point.name || "Sea point"));
+  if (!data.forecast) {
+    box.append(el("div", "error", "No forecast available"));
+    return box;
+  }
+  data.forecast.daily.forEach(d => {
+    box.append(el("div", null,
+      `${formatDate(d.date)}: ${d.temp_min_c}–${d.temp_max_c} °C, ${d.pressure_mean_hpa} hPa, wind ${d.wind_max_ms} m/s`));
+  });
+  return box;
+}
+
+function drawMap(data) {
+  const sea = [data.sea_point.lat, data.sea_point.lon];
+  const bounds = [sea];
+
+  // Dashed lines first, so the markers are drawn on top of them.
+  data.stations.filter(s => s.weight !== null).forEach(s => {
+    L.polyline([[s.lat, s.lon], sea], {
+      color: "#4cc9f0", weight: 1.5 + 5 * s.weight, opacity: 0.75, dashArray: "6 8",
+    }).addTo(map).bindTooltip(`${(s.weight * 100).toFixed(0)} %`,
+      { permanent: true, direction: "center", className: "weight" });
+  });
+
+  data.stations.forEach(s => {
+    const ok = s.status === "OK";
+    L.circleMarker([s.lat, s.lon], {
+      radius: 9, color: "#07131d", weight: 2,
+      fillColor: ok ? "#3ddc97" : "#ff5d5d", fillOpacity: 1,
+    }).addTo(map)
+      .bindPopup(stationPopup(s))
+      .bindTooltip(s.id, { permanent: true, direction: "right", offset: [10, 0], className: "label" });
+    bounds.push([s.lat, s.lon]);
+  });
+
+  const seaIcon = L.divIcon({
+    className: "sea-marker", iconSize: [28, 28], iconAnchor: [14, 14],
+    html: '<div class="ring"></div><div class="core"></div>',
+  });
+  L.marker(sea, { icon: seaIcon, title: "Sea forecast point", keyboard: true }).addTo(map)
+    .bindPopup(seaPopup(data))
+    .bindTooltip("SEA", { permanent: true, direction: "right", offset: [14, 0], className: "label" });
+
+  map.fitBounds(bounds, { padding: [40, 40] });
+}
+
+// ---------------------------------------------------------------- panel
+function drawPanel(data) {
+  const panel = document.getElementById("panel");
+  panel.replaceChildren();
+  panel.append(el("h1", null, "Kiel Bay marine forecast"));
+  const sp = data.sea_point;
+  panel.append(el("div", "sub",
+    `${sp.name || "Sea point"} · ${sp.lat.toFixed(2)}° N, ${sp.lon.toFixed(2)}° E`));
+
+  const f = data.forecast;
+  if (!f) {
+    panel.append(el("h2", null, "Forecast"));
+    panel.append(el("div", "error", "No forecast possible: " + (data.unavailable_reason || "unknown reason")));
+  } else {
+    // Pressure trend + warning badges
+    const t = f.pressure_trend;
+    const sign = t.change_hpa > 0 ? "+" : "";
+    panel.append(el("h2", null, "Outlook"));
+    panel.append(el("span", "pill",
+      `${TREND_ARROW[t.label] || ""} Pressure ${t.label} ${sign}${t.change_hpa} hPa`));
+    const badges = el("div", "badges");
+    f.daily.filter(d => d.wind_warning).forEach(d => {
+      badges.append(el("span", "badge " + warningColor(d.wind_warning),
+        `${formatDate(d.date).split(",")[0]} · ${shortWarning(d.wind_warning)}`));
+    });
+    panel.append(badges);
+
+    // Day cards
+    panel.append(el("h2", null, "Next " + f.daily.length + " days"));
+    f.daily.forEach(d => {
+      const card = el("div", "day");
+      card.append(el("div", "date", formatDate(d.date)));
+      const row1 = el("div", "vals");
+      row1.append(el("span", null, `🌡 ${d.temp_min_c}–${d.temp_max_c} °C`));
+      row1.append(el("span", null, `◎ ${d.pressure_mean_hpa} hPa`));
+      const row2 = el("div", "vals");
+      row2.append(el("span", null, `💨 ${d.wind_max_ms} m/s`));
+      if (d.wind_warning) {
+        row2.append(el("span", "badge " + warningColor(d.wind_warning), shortWarning(d.wind_warning)));
+      }
+      card.append(row1, row2);
+      panel.append(card);
+    });
+  }
+
+  // Stations
+  panel.append(el("h2", null, "Stations"));
+  data.stations.forEach(s => {
+    const row = el("div", "station");
+    row.append(el("span", "dot " + (s.status === "OK" ? "ok" : "bad")));
+    row.append(el("span", null, `${s.id} · ${s.name || ""}`));
+    row.append(s.weight !== null
+      ? el("span", "w", `${(s.weight * 100).toFixed(1)} %`)
+      : el("span", "w ex", s.status === "SUSPECT" ? "excluded" : "unused"));
+    row.append(el("div", "meta", `${s.distance_km} km · ${s.status}` +
+      (s.issues.length ? ` · ${s.issues.length} issue(s)` : "")));
+    panel.append(row);
+  });
+
+  const generated = new Date(data.generated_at).toLocaleString("en-GB", { timeZone: "UTC" });
+  panel.append(el("div", "note",
+    `Generated ${generated} UTC by agent.py · Report: ${data.report || "–"} · Synthetic data, for learning only.`));
+}
+
+// ---------------------------------------------------------------- load
+fetch("/api/forecast")
+  .then(async r => {
+    const body = await r.json();
+    if (!r.ok) throw new Error(body.detail || r.statusText);
+    return body;
+  })
+  .then(data => { drawMap(data); drawPanel(data); })
+  .catch(err => {
+    const panel = document.getElementById("panel");
+    panel.replaceChildren(el("h1", null, "Kiel Bay marine forecast"),
+                          el("div", "error", "Could not load the forecast: " + err.message));
+  });
+</script>
+</body>
+</html>

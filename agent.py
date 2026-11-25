@@ -258,6 +258,12 @@ def main():
     print("\n=== FINAL ANSWER ===")
     print(answer)
 
+    # Data for the map page. Written here in main() (not in run_agent), so
+    # experiments.py never overwrites it. The guardrails make sure a run that
+    # wasn't stopped or rejected has saved its report.
+    if not answer.startswith(("Stopped:", "Rejected:")):
+        print(f"\nMap data saved: {tools.save_forecast_json()}")
+
 
 if __name__ == "__main__":
     main()

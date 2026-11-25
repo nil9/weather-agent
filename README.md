@@ -2,9 +2,10 @@
 
 A learning project: an AI agent built from scratch, with no agent frameworks.
 
-Four (synthetic) weather stations, NORTH, EAST, SOUTH and WEST, surround a bay. The agent forecasts
-the next 3 days at a point in the sea and saves a Markdown report. Along the way it has to
-notice that station EAST has a broken sensor and leave it out.
+Four weather stations on the real coast of Kiel Bay (Baltic Sea), NORTH, EAST, SOUTH and WEST,
+surround a point in open water. Their weather data is synthetic. The agent forecasts the next
+3 days at the sea point, saves a Markdown report, and shows the result on an interactive map.
+Along the way it has to notice that station EAST has a broken sensor and leave it out.
 
 **Python tools do all the calculations.** The local LLM (`qwen2.5:7b` via Ollama) only decides
 which tool to call next and writes the final report from the tools' results.
@@ -30,10 +31,20 @@ python test_tools.py
 # 5. Run the agent
 python agent.py
 cat reports/forecast_report.md
+
+# 6. Show the forecast map
+python app.py
+# then open http://127.0.0.1:8000 in your browser (Ctrl+C stops the server)
 ```
 
 The agent prints a trace of each step (which tool it chose, the arguments, a shortened result)
-and saves the report to `reports/forecast_report.md`. A run takes about 30–60 seconds on a local GPU.
+and saves the report to `reports/forecast_report.md`, plus the map data in `reports/forecast.json`.
+A run takes about 20–60 seconds on a local GPU.
+
+The map shows the stations (green = OK, red = SUSPECT; click one for details), the sea point with
+the 3-day forecast and warning badges, and dashed lines weighted by each station's share of the
+forecast. It needs an internet connection for the map tiles and the Leaflet library. The server
+only listens on localhost.
 
 ## Files
 
@@ -43,6 +54,8 @@ and saves the report to `reports/forecast_report.md`. A run takes about 30–60 
 | `tools.py` | The 6 tools (stations, observations, data quality, Holt-Winters forecast, sea-point estimate, write report) and their JSON specs |
 | `agent.py` | The agent loop: LLM → tool call → result → LLM … → final answer |
 | `test_tools.py` | Calls each tool once and prints the result |
+| `app.py` | Small FastAPI server (localhost only): the map page at `/`, the forecast JSON at `/api/forecast` |
+| `web/index.html` | The map page: Leaflet + CARTO Dark Matter tiles (OpenStreetMap data, no API key) |
 | `experiments.py` | Runs the agent in "break" scenarios with pass/fail checks: `python experiments.py <scenario>` or `python experiments.py all --runs 5` |
 | `docs/architecture.md` | Diagrams and build progress |
 
@@ -55,7 +68,10 @@ flowchart LR
     tools["tools.py<br/>6 tools + TOOL_SPECS<br/>(all calculations)"]
     agent["agent.py<br/>chat + tool-calling loop"]
     llm["Ollama LLM<br/>qwen2.5:7b<br/>localhost:11434/v1"]
-    reports[("reports/<br/>*.md")]
+    reports[("reports/<br/>*.md, forecast.json")]
+    app["app.py<br/>FastAPI, 127.0.0.1:8000"]
+    web["web/index.html<br/>Leaflet map"]
+    browser(["Browser"])
 
     gen -->|writes| data
     data -->|read only| tools
@@ -64,6 +80,9 @@ flowchart LR
     agent -->|"messages + TOOL_SPECS"| llm
     llm -->|"tool_calls or final text"| agent
     tools -->|"write_report (path-checked)"| reports
+    reports -->|"forecast.json (read only)"| app
+    web --> app
+    app -->|"GET / and GET /api/forecast"| browser
 ```
 
 The LLM never runs code or touches files. It only *asks* for a tool call, and `agent.py` runs

@@ -1,4 +1,4 @@
-"""Generate dummy marine weather data for 4 stations around a bay.
+"""Generate dummy marine weather data for 4 stations around Kiel Bay.
 
 Writes:
   data/stations.json     - coordinates of the stations and the sea forecast point
@@ -23,16 +23,22 @@ SEED = 42                               # fixed seed -> same data every run
 DAYS = 30
 END_TIME = datetime(2026, 11, 25, 0, 0)  # first hour AFTER the last observation (UTC)
 
-# A fictional bay. Each station has small local quirks:
+# Kiel Bay (Baltic Sea). The stations sit on real coastline; the weather data is
+# still synthetic. Each station has small local quirks:
 #   temp_offset: local climate (degC)
 #   low_lag_h:   how many hours after WEST the low-pressure system arrives
 STATIONS = [
-    {"id": "NORTH", "lat": 54.60, "lon": 10.05, "temp_offset": -0.8, "low_lag_h": 4},
-    {"id": "EAST",  "lat": 54.45, "lon": 10.30, "temp_offset":  0.3, "low_lag_h": 8},
-    {"id": "SOUTH", "lat": 54.30, "lon": 10.05, "temp_offset":  0.9, "low_lag_h": 4},
-    {"id": "WEST",  "lat": 54.45, "lon":  9.80, "temp_offset":  0.0, "low_lag_h": 0},
+    {"id": "NORTH", "name": "Marstal (Ærø)",
+     "lat": 54.856, "lon": 10.517, "temp_offset": -0.8, "low_lag_h": 4},
+    {"id": "EAST",  "name": "Westermarkelsdorf (Fehmarn)",
+     "lat": 54.528, "lon": 11.060, "temp_offset":  0.3, "low_lag_h": 8},
+    {"id": "SOUTH", "name": "Schönberger Strand",
+     "lat": 54.425, "lon": 10.378, "temp_offset":  0.9, "low_lag_h": 4},
+    {"id": "WEST",  "name": "Damp",
+     "lat": 54.586, "lon": 10.017, "temp_offset":  0.0, "low_lag_h": 0},
 ]
-FORECAST_POINT = {"id": "SEA", "lat": 54.45, "lon": 10.05}
+# Open water in the middle of Kiel Bay.
+FORECAST_POINT = {"id": "SEA", "name": "Kiel Bay (open water)", "lat": 54.55, "lon": 10.45}
 
 # Low-pressure system settings
 LOW_DEPTH_HPA = 28      # how deep the low gets below normal pressure
@@ -131,7 +137,8 @@ def main():
     obs.to_csv(DATA_DIR / "observations.csv", index=False)
 
     stations_json = {
-        "stations": [{"id": s["id"], "lat": s["lat"], "lon": s["lon"]} for s in STATIONS],
+        "stations": [{"id": s["id"], "name": s["name"], "lat": s["lat"], "lon": s["lon"]}
+                     for s in STATIONS],
         "forecast_point": FORECAST_POINT,
     }
     (DATA_DIR / "stations.json").write_text(json.dumps(stations_json, indent=2))

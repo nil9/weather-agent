@@ -47,12 +47,14 @@ REPORT_FIELDS = ["temp_min_c", "temp_max_c", "pressure_mean_hpa", "wind_max_ms"]
 # Memory between tool calls within ONE agent run. estimate_at_sea_point stores its
 # result here; write_report checks the report against it. reset_state() clears it.
 _last_estimate = None
+_last_report_path = None     # set by write_report, used for forecast.json
 
 
 def reset_state():
-    """Forget the last estimate (call at the start of every agent run)."""
-    global _last_estimate
+    """Forget the last estimate and report (call at the start of every agent run)."""
+    global _last_estimate, _last_report_path
     _last_estimate = None
+    _last_report_path = None
 
 
 # ---------------------------------------------------------------------------
@@ -188,7 +190,7 @@ def list_stations() -> dict:
     sea = info["forecast_point"]
     stations = [
         {
-            "id": s["id"], "lat": s["lat"], "lon": s["lon"],
+            "id": s["id"], "name": s.get("name"), "lat": s["lat"], "lon": s["lon"],
             "distance_to_sea_point_km": round(_distance_km(s["lat"], s["lon"], sea["lat"], sea["lon"]), 1),
         }
         for s in info["stations"]
@@ -377,7 +379,57 @@ def write_report(text: str, filename: str = "forecast_report.md") -> dict:
                              f"are missing: {', '.join(missing)}. Include the full day-by-day table.")
     REPORTS_DIR.mkdir(exist_ok=True)
     path.write_text(text, encoding="utf-8")
-    return {"saved": str(path.relative_to(BASE_DIR)), "characters": len(text)}
+    global _last_report_path
+    _last_report_path = str(path.relative_to(BASE_DIR))
+    return {"saved": _last_report_path, "characters": len(text)}
+
+
+# ---------------------------------------------------------------------------
+# Not a tool: called by agent.py after a successful run, never by the LLM.
+# ---------------------------------------------------------------------------
+
+def save_forecast_json() -> str:
+    """Write reports/forecast.json for the map page, built only from tool results.
+
+    Contains every station (coordinates, quality status, weight), the sea point,
+    and the last sea-point forecast. Returns the saved path.
+    """
+    if _last_estimate is None:
+        raise ValueError("No estimate in this run: nothing to save")
+    info = _load_stations()
+    sea = info["forecast_point"]
+    weights = _last_estimate.get("weights", {})
+
+    stations = []
+    for s in info["stations"]:
+        issues = _quality_issues(s["id"])
+        stations.append({
+            "id": s["id"], "name": s.get("name"), "lat": s["lat"], "lon": s["lon"],
+            "distance_km": round(_distance_km(s["lat"], s["lon"], sea["lat"], sea["lon"]), 1),
+            "status": "SUSPECT" if issues else "OK",
+            "issues": issues,
+            "weight": weights.get(s["id"]),        # None = not used in the forecast
+        })
+
+    unavailable = _last_estimate.get("unavailable")
+    forecast = None if unavailable else {
+        "daily": _last_estimate["daily"],
+        "pressure_trend": _last_estimate["pressure_trend"],
+        "warnings": _last_estimate["warnings"],
+        "stations_used": _last_estimate["stations_used"],
+    }
+    data = {
+        "generated_at": pd.Timestamp.now(tz="UTC").strftime("%Y-%m-%dT%H:%M:%SZ"),
+        "sea_point": sea,
+        "stations": stations,
+        "forecast": forecast,                       # None if no forecast was possible
+        "unavailable_reason": unavailable,
+        "report": _last_report_path,
+    }
+    path = _safe_path(REPORTS_DIR, "forecast.json")
+    REPORTS_DIR.mkdir(exist_ok=True)
+    path.write_text(json.dumps(data, indent=2, ensure_ascii=False), encoding="utf-8")
+    return str(path.relative_to(BASE_DIR))
 
 
 # ---------------------------------------------------------------------------
