@@ -20,7 +20,11 @@ Python tools do every calculation. The local LLM only picks which tools to call 
 
 | 6 | Task validated before the loop; `write_report` checks the report against the last estimate; `experiments.py --runs N` with pass/fail | ✅ Done |
 
-*Last updated: end of step 6.*
+| 7 | `agent.TEMPERATURE` setting; `experiments.py --temperature` | ✅ Done |
+
+| 8 | `MAX_STEPS = 20`; `max_tokens` and a timeout on each LLM call (no silent SDK retries) | ✅ Done |
+
+*Last updated: end of step 8.*
 
 `experiments.py` doesn't change the diagrams. It imports `agent.py`, swaps the task, the system prompt
 or entries in `agent.TOOL_FUNCTIONS`, and redirects `write_report` to `reports/experiment_<scenario>.md`.
@@ -76,7 +80,7 @@ sequenceDiagram
     end
     A->>A: messages = [system prompt, user request]
 
-    loop until the LLM replies with no tool_calls (max MAX_STEPS = 15 LLM calls)
+    loop until the LLM replies with no tool_calls (max MAX_STEPS = 20 LLM calls, each with max_tokens + timeout)
         A->>L: chat.completions(messages, tools=TOOL_SPECS)
         L-->>A: assistant message with tool_calls<br/>e.g. check_data_quality("EAST")
         A->>T: run_tool(name, arguments JSON)

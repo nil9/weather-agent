@@ -200,7 +200,11 @@ def main():
     parser = argparse.ArgumentParser(description="Run the agent in 'break' scenarios.")
     parser.add_argument("scenario", choices=[*SCENARIOS, "all"])
     parser.add_argument("--runs", type=int, default=1, help="runs per scenario (default 1)")
+    parser.add_argument("--temperature", type=float, default=agent.TEMPERATURE,
+                        help=f"LLM temperature (default {agent.TEMPERATURE})")
     args = parser.parse_args()
+    agent.TEMPERATURE = args.temperature
+    print(f"temperature = {agent.TEMPERATURE}")
 
     names = list(SCENARIOS) if args.scenario == "all" else [args.scenario]
     verbose = len(names) == 1 and args.runs == 1     # full trace only for a single run

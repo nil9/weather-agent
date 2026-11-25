@@ -12,19 +12,24 @@ shortened result, so you can follow the agent's "thinking" step by step.
 import json
 import re
 
-from openai import OpenAI
+from openai import APIError, APITimeoutError, OpenAI
 
 import tools
 from tools import TOOL_SPECS
 
 MODEL = "qwen2.5:7b"
-MAX_STEPS = 15         # max number of LLM calls in one run
+TEMPERATURE = 0        # 0 = (almost) the same answer every run; higher = more random
+MAX_STEPS = 20         # max number of LLM calls in one run
+MAX_TOKENS = 1500      # max tokens the LLM may generate per call (a full report is ~600)
+LLM_TIMEOUT_S = 120    # seconds before one LLM call is abandoned
 MAX_REMINDERS = 2      # guardrail 4: how often we send the LLM back to save the report
 MAX_SAME_TOOL_FAILS = 3  # guardrail 5: stop if one tool fails this many times in a row
 TRACE_WIDTH = 160      # shorten long arguments/results in the trace to this many characters
 
 # Ollama speaks the OpenAI API. The api_key is required by the SDK but ignored by Ollama.
-client = OpenAI(base_url="http://localhost:11434/v1", api_key="ollama")
+# max_retries=0: by default the SDK silently retries a timed-out call twice,
+# which would turn a 120 s timeout into a 6-minute wait.
+client = OpenAI(base_url="http://localhost:11434/v1", api_key="ollama", max_retries=0)
 
 # The LLM only sends a function NAME (a string). This table maps that name
 # to the real Python function. Only functions listed here can ever be run.
@@ -168,13 +173,23 @@ def run_agent(task: str) -> str:
     failing_tool, fail_count = None, 0   # guardrail 5: consecutive failures of one tool
 
     for step in range(1, MAX_STEPS + 1):
-        response = client.chat.completions.create(
-            model=MODEL,
-            messages=messages,
-            tools=TOOL_SPECS,      # the JSON schemas from tools.py: the LLM's "menu"
-            temperature=0,         # as repeatable as possible
-        )
+        try:
+            response = client.chat.completions.create(
+                model=MODEL,
+                messages=messages,
+                tools=TOOL_SPECS,      # the JSON schemas from tools.py: the LLM's "menu"
+                temperature=TEMPERATURE,
+                max_tokens=MAX_TOKENS,  # stops runaway generation
+                timeout=LLM_TIMEOUT_S,  # stops a call that hangs
+            )
+        except APITimeoutError:
+            print(f"\n[step {step}] [guardrail] LLM call took longer than {LLM_TIMEOUT_S} s -> stop")
+            return f"Stopped: LLM call timed out after {LLM_TIMEOUT_S} s."
+        except APIError as exc:                  # Ollama down, bad request, ...
+            return f"Stopped: LLM call failed: {exc}"
         message = response.choices[0].message
+        if response.choices[0].finish_reason == "length":
+            print(f"\n[step {step}] [note] reply cut off at max_tokens={MAX_TOKENS}")
 
         # No tool calls -> the LLM thinks it is done.
         if not message.tool_calls:
