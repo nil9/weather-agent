@@ -1,2 +1,4 @@
 .venv/
+# fetched real data (DWD / Open-Meteo cache); tests/fixtures/ IS committed
+data/real/
 __pycache__/

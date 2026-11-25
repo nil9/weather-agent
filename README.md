@@ -41,10 +41,30 @@ python compare_models.py
 # 6. Show the forecast map
 python app.py
 # then open http://127.0.0.1:8000 in your browser (Ctrl+C stops the server)
+
+# 7. Optional: real observations instead of the dummy data (internet needed, no API key)
+WEATHER_DATA_SOURCE=real python agent.py     # fetches DWD data first (cached 60 min)
+WEATHER_DATA_SOURCE=real python app.py       # map with "our estimate" next to Open-Meteo
+python real_data.py                          # just refresh and list the stations
+python test_real_data.py                     # offline tests (saved API answers)
 ```
 
+**Real data** (`WEATHER_DATA_SOURCE=real`): hourly observations of the last 14 days from DWD
+stations around Kiel Bay, via the [Bright Sky](https://brightsky.dev) API (no key). A station is
+used only if it reports temperature, pressure and wind now and for ≥ 90 % of the 14 days; the
+agent gets the 4 nearest to the sea point, a clicked point its own 4 nearest. Gaps up to 3 h are
+filled linearly, so longer gaps still make a station SUSPECT. Data is cached in `data/real/` for 60 min;
+if a refresh fails, the last good data is used and the page says "data from <time>". With no
+data at all you get an error, never dummy data. The page shows the
+[Open-Meteo](https://open-meteo.com) model forecast next to our 4-station estimate, over the same hours (comparison only).
+Each mode keeps its own files: `reports/forecast_dummy.json` / `reports/forecast_real.json`
+(the real report goes to `reports/real/`), so you can switch without rerunning the agent.
+In real mode the sailing verdict uses the **higher** max wind of our estimate and Open-Meteo,
+and the chat says which source it came from.
+Sources: Deutscher Wetterdienst (DWD) via Bright Sky; Open-Meteo.com (CC BY 4.0).
+
 The agent prints a trace of each step (which tool it chose, the arguments, a shortened result)
-and saves the report to `reports/forecast_report.md`, plus the map data in `reports/forecast.json`.
+and saves the report to `reports/forecast_report.md`, plus the map data in `reports/forecast_dummy.json` (real mode: `reports/real/forecast_report.md` and `reports/forecast_real.json`).
 A run takes about 20–60 seconds on a local GPU.
 
 The map shows the stations (green = OK, red = SUSPECT; click one for details), the sea point with
@@ -68,6 +88,8 @@ navigation advice. Run `python test_chat.py` to check the chat against a fixed s
 |------|---------|
 | `generate_data.py` | Writes `data/stations.json` and `data/observations.csv` (30 days, hourly) |
 | `download_land.py` | One-time download of Natural Earth 1:10m land polygons, clipped to Kiel Bay → `data/land_kiel_bay.geojson` (for the land/sea check) |
+| `real_data.py` | Real mode: finds DWD stations (Bright Sky), fetches and converts 14 days of observations into `data/real/current/`, cache + fallback, Open-Meteo comparison values |
+| `test_real_data.py` | Offline tests for the real-data path, using saved API answers in `tests/fixtures/` |
 | `tools.py` | The 6 tools (stations, observations, data quality, Holt-Winters forecast, sea-point estimate, write report) and their JSON specs |
 | `agent.py` | The agent loop: LLM → tool call → result → LLM … → final answer |
 | `test_tools.py` | Calls each tool once and prints the result |
@@ -75,7 +97,7 @@ navigation advice. Run `python test_chat.py` to check the chat against a fixed s
 | `chat.py` | Chat logic: topic gate, read-only tool loop, answer checks (numbers, verdicts, required tools) |
 | `test_chat.py` | Chat regression tests: all suggestion chips, 12 normal questions, 5 off-topic questions, 3 questions for a clicked point; answers checked against the tools (`--runs N`) |
 | `web/index.html` | The map page: Leaflet + OpenStreetMap tiles with a dark CSS filter (no API key), Forecast / Ask tabs |
-| `compare_models.py` | Runs the agent with each model in `agent.MODELS` one after another, ranks the runs in code, saves the winner to `forecast.json` and all runs to `model_comparison.json` |
+| `compare_models.py` | Runs the agent with each model in `agent.MODELS` one after another, ranks the runs in code, saves the winner to `forecast_<source>.json` and all runs to `model_comparison_<source>.json` |
 | `test_compare.py` | Tests the ranking rules (no LLM needed) |
 | `experiments.py` | Runs the agent in "break" scenarios with pass/fail checks: `python experiments.py <scenario>` or `python experiments.py all --runs 5 [--temperature 0.7] [--model qwen2.5:14b]` |
 | `docs/architecture.md` | Diagrams and build progress |
@@ -90,7 +112,7 @@ flowchart LR
     tools["tools.py<br/>6 tools + TOOL_SPECS<br/>(all calculations)"]
     agent["agent.py<br/>chat + tool-calling loop"]
     llm["Ollama LLM<br/>qwen2.5:7b<br/>localhost:11434/v1"]
-    reports[("reports/<br/>*.md, forecast.json")]
+    reports[("reports/<br/>*.md, forecast_dummy.json,<br/>forecast_real.json")]
     app["app.py<br/>FastAPI, 127.0.0.1:8000"]
     web["web/index.html<br/>Leaflet map + chat"]
     chat["chat.py<br/>read-only chat"]
@@ -103,7 +125,7 @@ flowchart LR
     agent -->|"messages + TOOL_SPECS"| llm
     llm -->|"tool_calls or final text"| agent
     tools -->|"write_report (path-checked)"| reports
-    reports -->|"forecast.json (read only)"| app
+    reports -->|"forecast_&lt;source&gt;.json (read only)"| app
     web --> app
     app -->|"GET / and GET /api/forecast"| browser
     browser -->|"POST /api/chat"| app

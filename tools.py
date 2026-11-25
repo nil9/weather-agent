@@ -11,6 +11,7 @@ TOOL_SPECS at the bottom describes the tools to the LLM (OpenAI tool format).
 import json
 import functools
 import math
+import os
 import re
 import threading
 import warnings
@@ -27,6 +28,28 @@ from statsmodels.tsa.holtwinters import ExponentialSmoothing
 BASE_DIR = Path(__file__).resolve().parent
 DATA_DIR = BASE_DIR / "data"
 REPORTS_DIR = BASE_DIR / "reports"
+
+# Where the observations come from: "dummy" (generate_data.py, the default) or "real"
+# (DWD stations via Bright Sky, fetched by real_data.py). Each has its own folder, and
+# Each also has its own forecast file (forecast_dummy.json / forecast_real.json), which
+# records the source it was made from, so the two are never mixed.
+DATA_SOURCE = os.environ.get("WEATHER_DATA_SOURCE", "dummy")
+DATA_SOURCES = {"dummy": "", "real": "real/current/"}      # folder inside data/
+if DATA_SOURCE not in DATA_SOURCES:
+    raise SystemExit(f"WEATHER_DATA_SOURCE must be one of {list(DATA_SOURCES)}, not {DATA_SOURCE!r}")
+
+
+REPORT_FOLDERS = {"dummy": "", "real": "real/"}           # report folder inside reports/
+
+
+def forecast_file() -> str:
+    """The map/chat forecast of the current data source, inside reports/."""
+    return f"forecast_{DATA_SOURCE}.json"
+
+
+def comparison_file() -> str:
+    """compare_models.py's ranking for the current data source, inside reports/."""
+    return f"model_comparison_{DATA_SOURCE}.json"
 
 # Data-quality thresholds
 STUCK_MIN_HOURS = 6          # same value this many hours in a row = stuck sensor
@@ -80,13 +103,25 @@ def _safe_path(base_dir: Path, filename: str) -> Path:
     return path
 
 
+def _data_file(name: str) -> Path:
+    """A data file of the CURRENT data source (data/ for dummy, data/real/current/ for real).
+    This is the only place that decides which data the tools read."""
+    return _safe_path(DATA_DIR, DATA_SOURCES[DATA_SOURCE] + name)
+
+
 def _load_stations() -> dict:
-    return json.loads(_safe_path(DATA_DIR, "stations.json").read_text())
+    return json.loads(_data_file("stations.json").read_text(encoding="utf-8"))
+
+
+def _station_coords() -> dict[str, dict]:
+    """id -> station for the agent's stations plus (real data) the wider pool."""
+    info = _load_stations()
+    return {s["id"]: s for s in info.get("pool", []) + info["stations"]}
 
 
 def _load_observations(station: str) -> pd.DataFrame:
     """All rows of one station, sorted by time, with a datetime index."""
-    df = pd.read_csv(_safe_path(DATA_DIR, "observations.csv"), parse_dates=["timestamp"])
+    df = pd.read_csv(_data_file("observations.csv"), parse_dates=["timestamp"])
     df = df[df["station_id"] == station].sort_values("timestamp")
     return df.set_index("timestamp")
 
@@ -134,8 +169,12 @@ def _forecast_station_daily(station: str, days: int) -> list[dict]:
     df = _load_observations(station)
     train = df[df.index > df.index[-1] - pd.Timedelta(days=TRAIN_DAYS)]
 
-    hours = days * 24
-    future_index = pd.date_range(df.index[-1] + pd.Timedelta(hours=1), periods=hours, freq="h")
+    # The forecast covers `days` calendar days (UTC), starting with the day of the first
+    # forecast hour. Dummy data ends at 23:00, so that's 3 full days. Real data ends at the
+    # latest hour, so the first day is only the rest of today (marked with from_utc).
+    first = df.index[-1] + pd.Timedelta(hours=1)
+    hours = (24 - first.hour) + (days - 1) * 24
+    future_index = pd.date_range(first, periods=hours, freq="h")
     fc = pd.DataFrame(index=future_index)
     for col in ["temperature_c", "pressure_hpa", "wind_speed_ms"]:
         fc[col] = _holt_winters(train[col], hours)
@@ -143,13 +182,16 @@ def _forecast_station_daily(station: str, days: int) -> list[dict]:
 
     daily = []
     for date, day in fc.groupby(fc.index.date):
-        daily.append({
-            "date": str(date),
+        row = {"date": str(date)}
+        if day.index[0].hour != 0:
+            row["from_utc"] = f"{day.index[0]:%H:%M}"      # partial first day
+        row.update({
             "temp_min_c": round(day["temperature_c"].min(), 1),
             "temp_max_c": round(day["temperature_c"].max(), 1),
             "pressure_mean_hpa": round(day["pressure_hpa"].mean(), 1),
             "wind_max_ms": round(day["wind_speed_ms"].max(), 1),
         })
+        daily.append(row)
     return daily
 
 
@@ -182,7 +224,7 @@ def _idw_weights(stations: list[str], lat: float, lon: float) -> dict[str, float
     Shared by estimate_at_sea_point (agent) and forecast_at (map clicks), so both
     always use exactly the same logic.
     """
-    coords = {s["id"]: s for s in _load_stations()["stations"]}
+    coords = _station_coords()
     dist = {s: _distance_km(coords[s]["lat"], coords[s]["lon"], lat, lon) for s in stations}
     nearest = min(dist, key=dist.get)
     if dist[nearest] < AT_STATION_KM:             # on top of a station: avoid dividing by ~0
@@ -197,7 +239,10 @@ def _combine_daily(forecasts: dict[str, list[dict]], weights: dict[str, float]) 
     stations = list(forecasts)
     daily = []
     for i in range(len(forecasts[stations[0]])):
-        day = {"date": forecasts[stations[0]][i]["date"]}
+        first = forecasts[stations[0]][i]
+        day = {"date": first["date"]}
+        if "from_utc" in first:
+            day["from_utc"] = first["from_utc"]
         for f in REPORT_FIELDS:
             # float(): plain Python numbers, not numpy types (those can't be sent as JSON)
             day[f] = round(float(sum(weights[s] * forecasts[s][i][f] for s in stations)), 1)
@@ -382,13 +427,14 @@ def _missing_forecast_numbers(text: str) -> list[str]:
 @_as_json
 def write_report(text: str, filename: str = "forecast_report.md") -> dict:
     """Save a Markdown report inside ./reports (and nowhere else).
+    Real data: inside ./reports/real/, so a real report never overwrites a dummy one.
 
     Guardrail: the report must match the last estimate_at_sea_point result, so a
     placeholder or invented numbers can't be saved as a "forecast".
     """
     if not filename.endswith(".md"):
         raise ValueError("filename must end with .md")
-    path = _safe_path(REPORTS_DIR, filename)   # raises if it points outside reports/
+    path = _safe_path(REPORTS_DIR, REPORT_FOLDERS[DATA_SOURCE] + filename)   # raises if outside reports/
     if _last_estimate is None:
         raise ValueError("No forecast to report yet: call estimate_at_sea_point first. If it "
                          "says no forecast is possible, write a report saying it is unavailable.")
@@ -402,7 +448,7 @@ def write_report(text: str, filename: str = "forecast_report.md") -> dict:
         if missing:
             raise ValueError("Report rejected: these forecast numbers from estimate_at_sea_point "
                              f"are missing: {', '.join(missing)}. Include the full day-by-day table.")
-    REPORTS_DIR.mkdir(exist_ok=True)
+    path.parent.mkdir(parents=True, exist_ok=True)
     path.write_text(text, encoding="utf-8")
     global _last_report_path
     _last_report_path = str(path.relative_to(BASE_DIR))
@@ -415,7 +461,7 @@ def write_report(text: str, filename: str = "forecast_report.md") -> dict:
 
 def save_forecast_json(estimate: dict | None = None, report: str | None = None,
                        model: str | None = None) -> str:
-    """Write reports/forecast.json for the map page, built only from tool results.
+    """Write reports/forecast_<data source>.json for the map page, built only from tool results.
 
     Contains every station (coordinates, quality status, weight), the sea point,
     and the sea-point forecast. By default it uses the last estimate of this process;
@@ -456,19 +502,53 @@ def save_forecast_json(estimate: dict | None = None, report: str | None = None,
         "unavailable_reason": unavailable,
         "report": report,
         "model": model,                             # which LLM ran the agent (None if unknown)
+        **data_source_info(),                       # data_source, data_time, data_note
     }
-    path = _safe_path(REPORTS_DIR, "forecast.json")
+    path = _safe_path(REPORTS_DIR, forecast_file())
     REPORTS_DIR.mkdir(exist_ok=True)
     path.write_text(json.dumps(data, indent=2, ensure_ascii=False), encoding="utf-8")
     return str(path.relative_to(BASE_DIR))
+
+
+def data_source_info() -> dict:
+    """Which data a forecast is made from, for forecast.json and the page.
+    Dummy: the newest observation time. Real: the same, plus a note if the data is old
+    or the last refresh failed (from real_data.py)."""
+    if DATA_SOURCE == "real":
+        import real_data                            # only needed for real data
+        info = real_data.data_info()
+        return {k: info[k] for k in ["data_source", "data_time", "data_note"]}
+    newest = pd.read_csv(_data_file("observations.csv"), usecols=["timestamp"])["timestamp"].max()
+    return {"data_source": "dummy", "data_time": newest, "data_note": None}
 
 
 # ---------------------------------------------------------------------------
 # Tool specs: what the LLM sees (OpenAI chat-completions "tools" format)
 # ---------------------------------------------------------------------------
 
-_STATION_PARAM = {"type": "string", "enum": ["NORTH", "EAST", "SOUTH", "WEST"],
-                  "description": "Station id"}
+NUMBER_WORDS = ["No", "One", "Two", "Three", "Four", "Five", "Six", "Seven", "Eight", "Nine", "Ten"]
+
+
+def station_ids() -> list[str]:
+    """IDs of the agent's stations for the current data source ([] if there is no data yet)."""
+    try:
+        return [s["id"] for s in _load_stations()["stations"]]
+    except FileNotFoundError:
+        return []
+
+
+def stations_sentence() -> str:
+    """The stations line of the agent's system prompt. For the dummy data this is exactly
+    "Four coastal stations (NORTH, EAST, SOUTH, WEST) surround the bay." """
+    ids = station_ids()
+    count = NUMBER_WORDS[len(ids)] if len(ids) < len(NUMBER_WORDS) else str(len(ids))
+    return f"{count} coastal stations ({', '.join(ids)}) surround the bay."
+
+
+def _station_param(ids: list[str] | None = None) -> dict:
+    """Station argument for the specs. The enum lists the stations of the current data."""
+    ids = station_ids() if ids is None else ids
+    return {"type": "string", **({"enum": ids} if ids else {}), "description": "Station id"}
 _DAYS_PARAM = {"type": "integer", "minimum": 1, "maximum": MAX_FORECAST_DAYS, "default": 3,
                "description": "Number of days to forecast"}
 
@@ -481,44 +561,51 @@ def _spec(name, description, properties=None, required=None):
     }}
 
 
-TOOL_SPECS = [
-    _spec("list_stations",
-          "List the weather stations, their coordinates and their distance (km) to the "
-          "sea forecast point."),
-    _spec("get_observations",
-          "Summarise recent observations of one station: min/max/mean/latest for temperature, "
-          "pressure, wind and humidity, plus pressure change and 3-hour pressure tendency.",
-          {"station": _STATION_PARAM,
-           "hours": {"type": "integer", "minimum": 1, "maximum": 720, "default": 24,
-                     "description": "How many recent hours to summarise"}},
-          ["station"]),
-    _spec("check_data_quality",
-          "Check one station's sensor data for stuck values, impossible jumps and gaps. "
-          "Returns status OK or SUSPECT with a list of issues. Do not trust SUSPECT stations.",
-          {"station": _STATION_PARAM}, ["station"]),
-    _spec("forecast_station",
-          "Forecast one station with Holt-Winters. Returns per-day temperature min/max, "
-          "mean pressure and max wind speed. Returns an error for SUSPECT stations.",
-          {"station": _STATION_PARAM, "days": _DAYS_PARAM}, ["station"]),
-    _spec("estimate_at_sea_point",
-          "Forecast the sea point by combining the forecasts of the given stations with "
-          "inverse-distance weighting. SUSPECT stations are excluded automatically "
-          "(listed in stations_excluded); if none is reliable it returns an error. "
-          "Returns per-day values with a wind_warning, the pressure_trend "
-          "(rising/falling/steady) and a list of warnings.",
-          {"stations": {"type": "array", "items": _STATION_PARAM, "minItems": 1,
-                        "description": "Stations to combine"},
-           "days": _DAYS_PARAM},
-          ["stations"]),
-    _spec("write_report",
-          "Save the final forecast report as a Markdown file in the reports folder. "
-          "The text must contain every daily number from the last estimate_at_sea_point "
-          "result (temp min/max, mean pressure, max wind), or it is rejected.",
-          {"text": {"type": "string", "description": "The full report in Markdown"},
-           "filename": {"type": "string", "default": "forecast_report.md",
-                        "description": "File name ending in .md (no folders)"}},
-          ["text"]),
-]
+def tool_specs() -> list[dict]:
+    """The agent's tool specs, built from the current station list (the agent calls this
+    at the start of every run). For the dummy data the enum is NORTH/EAST/SOUTH/WEST."""
+    _STATION_PARAM = _station_param()
+    return [
+        _spec("list_stations",
+              "List the weather stations, their coordinates and their distance (km) to the "
+              "sea forecast point."),
+        _spec("get_observations",
+              "Summarise recent observations of one station: min/max/mean/latest for temperature, "
+              "pressure, wind and humidity, plus pressure change and 3-hour pressure tendency.",
+              {"station": _STATION_PARAM,
+               "hours": {"type": "integer", "minimum": 1, "maximum": 720, "default": 24,
+                         "description": "How many recent hours to summarise"}},
+              ["station"]),
+        _spec("check_data_quality",
+              "Check one station's sensor data for stuck values, impossible jumps and gaps. "
+              "Returns status OK or SUSPECT with a list of issues. Do not trust SUSPECT stations.",
+              {"station": _STATION_PARAM}, ["station"]),
+        _spec("forecast_station",
+              "Forecast one station with Holt-Winters. Returns per-day temperature min/max, "
+              "mean pressure and max wind speed. Returns an error for SUSPECT stations.",
+              {"station": _STATION_PARAM, "days": _DAYS_PARAM}, ["station"]),
+        _spec("estimate_at_sea_point",
+              "Forecast the sea point by combining the forecasts of the given stations with "
+              "inverse-distance weighting. SUSPECT stations are excluded automatically "
+              "(listed in stations_excluded); if none is reliable it returns an error. "
+              "Returns per-day values with a wind_warning, the pressure_trend "
+              "(rising/falling/steady) and a list of warnings.",
+              {"stations": {"type": "array", "items": _STATION_PARAM, "minItems": 1,
+                            "description": "Stations to combine"},
+               "days": _DAYS_PARAM},
+              ["stations"]),
+        _spec("write_report",
+              "Save the final forecast report as a Markdown file in the reports folder. "
+              "The text must contain every daily number from the last estimate_at_sea_point "
+              "result (temp min/max, mean pressure, max wind), or it is rejected.",
+              {"text": {"type": "string", "description": "The full report in Markdown"},
+               "filename": {"type": "string", "default": "forecast_report.md",
+                            "description": "File name ending in .md (no folders)"}},
+              ["text"]),
+    ]
+
+
+TOOL_SPECS = tool_specs()      # built at import (test_tools.py prints it)
 
 
 # ===========================================================================
@@ -605,11 +692,24 @@ def _beaufort(wind_ms: float) -> int:
     return int(sum(wind_ms >= limit for limit in BEAUFORT_LIMITS))
 
 
+class DataSourceMismatch(FileNotFoundError):
+    """forecast.json was made from the other data source (dummy vs real).
+    A FileNotFoundError, so every caller treats it like "no usable forecast"."""
+
+
 def _load_forecast_json() -> dict:
-    path = _safe_path(REPORTS_DIR, "forecast.json")
+    path = _safe_path(REPORTS_DIR, forecast_file())
     if not path.exists():
-        raise FileNotFoundError("No forecast yet. Run `python agent.py` first.")
-    return json.loads(path.read_text(encoding="utf-8"))
+        hint = "python agent.py" if DATA_SOURCE == "dummy" else "WEATHER_DATA_SOURCE=real python agent.py"
+        raise FileNotFoundError(f"No {DATA_SOURCE} forecast yet ({path.name}). Run `{hint}` first.")
+    data = json.loads(path.read_text(encoding="utf-8"))
+    made_from = data.get("data_source", "dummy")       # older files: always dummy
+    # Each source has its own file, so this only trips on a copied or edited file.
+    if made_from != DATA_SOURCE:
+        raise DataSourceMismatch(
+            f"The forecast was made from {made_from} data, but {DATA_SOURCE} data is selected. "
+            f"Run `WEATHER_DATA_SOURCE={DATA_SOURCE} python agent.py` first.")
+    return data
 
 
 def _require_forecast(data: dict) -> dict:
@@ -640,16 +740,55 @@ def _cached_station_forecasts(run: dict) -> dict[str, list[dict]]:
         return _station_forecast_cache[run_id]
 
 
+POINT_STATIONS = 4           # real data: a clicked point uses its 4 nearest pool stations
+_pool_cache: dict[str, dict] = {}   # real data: {run id: {(kind, station): result}}
+
+
+def _cached_pool(run: dict, kind: str, station: str, compute):
+    """Real data: quality check / forecast of one pool station, computed once per agent run."""
+    run_id = run["generated_at"]
+    with _cache_lock:
+        if run_id not in _pool_cache:
+            _pool_cache.clear()
+            _pool_cache[run_id] = {}
+        bucket = _pool_cache[run_id]
+        if (kind, station) not in bucket:
+            bucket[(kind, station)] = compute()
+        return bucket[(kind, station)]
+
+
+def _real_point_stations(run: dict, lat: float, lon: float) -> list[dict]:
+    """Real data: the POINT_STATIONS nearest pool stations to (lat, lon), each checked
+    with the unchanged _quality_issues (in code, no LLM)."""
+    if run.get("data_time") != data_source_info()["data_time"]:
+        raise DataSourceMismatch(
+            "The real data was refreshed after the last agent run, so the forecast and the "
+            "stations would not match. Run `WEATHER_DATA_SOURCE=real python agent.py` again.")
+    pool = sorted(_station_coords().values(),
+                  key=lambda s: _distance_km(s["lat"], s["lon"], lat, lon))[:POINT_STATIONS]
+    stations = []
+    for s in pool:
+        issues = _cached_pool(run, "quality", s["id"], lambda sid=s["id"]: _quality_issues(sid))
+        stations.append({"id": s["id"], "name": s.get("name"), "lat": s["lat"], "lon": s["lon"],
+                         "status": "SUSPECT" if issues else "OK", "issues": issues})
+    return stations
+
+
 def forecast_at(lat: float, lon: float) -> dict:
     """Forecast for any point, in code (no LLM), in the same shape as forecast.json.
 
-    Uses only the stations the last agent run marked OK and the same inverse-distance
-    weighting as estimate_at_sea_point (_idw_weights + _combine_daily).
+    Dummy data: uses only the stations the last agent run marked OK.
+    Real data: uses the 4 nearest pool stations to the point that pass the quality check.
+    Both use the same inverse-distance weighting as estimate_at_sea_point
+    (_idw_weights + _combine_daily).
     """
     run = _load_forecast_json()
     _require_forecast(run)
-    ok = [s for s in run["stations"] if s["status"] == "OK"]
+    all_stations = _real_point_stations(run, lat, lon) if DATA_SOURCE == "real" else run["stations"]
+    ok = [s for s in all_stations if s["status"] == "OK"]
     if not ok:
+        if DATA_SOURCE == "real":
+            raise PointRejected("No reliable station near this point (all nearby stations are SUSPECT).")
         raise ValueError("The last agent run has no OK stations.")
     dist = {s["id"]: _distance_km(s["lat"], s["lon"], lat, lon) for s in ok}
     nearest = min(dist, key=dist.get)
@@ -660,14 +799,21 @@ def forecast_at(lat: float, lon: float) -> dict:
     if is_on_land(lat, lon):
         raise PointOnLand("This point is on land. Marine forecast only for water.")
 
-    forecasts = _cached_station_forecasts(run)
+    if DATA_SOURCE == "real":
+        days = len(run["forecast"]["daily"])
+        forecasts = {s["id"]: _cached_pool(run, "forecast", s["id"],
+                                           lambda sid=s["id"]: _forecast_station_daily(sid, days))
+                     for s in ok}
+    else:
+        forecasts = _cached_station_forecasts(run)
     weights = _idw_weights(list(forecasts), lat, lon)
     combined = _combine_daily(forecasts, weights)
     stations = [{**s,
                  "distance_km": round(_distance_km(s["lat"], s["lon"], lat, lon), 1),
                  "weight": round(weights[s["id"]], 3) if s["id"] in weights else None}
-                for s in run["stations"]]
+                for s in all_stations]
     return {
+        **{k: run.get(k) for k in ["data_source", "data_time", "data_note", "model"]},
         "generated_at": run["generated_at"],
         "sea_point": {"id": "POINT", "name": "Selected point",
                       "lat": round(lat, 4), "lon": round(lon, 4)},
@@ -724,7 +870,10 @@ def _get_forecast(data: dict, day: str | list[str] | None = None) -> dict:
 def _get_station_status(data: dict, station: str | None = None) -> dict:
     stations = data["stations"]
     if station:
-        name = _check_station(station)
+        name = str(station).strip().upper()
+        valid = [s["id"] for s in stations]       # the stations of THIS point
+        if name not in valid:
+            raise ValueError(f"Unknown station '{station}'. Valid stations: {valid}")
         stations = [s for s in stations if s["id"] == name]
     return {"stations": stations}
 
@@ -736,29 +885,80 @@ def _get_warnings(data: dict) -> dict:
             "pressure_outlook": pressure_outlook(trend)}
 
 
+WIND_SOURCE_OURS = "our estimate"            # the 4-station forecast
+WIND_SOURCE_MODEL = "Open-Meteo"              # the model forecast (real data only)
+WIND_SOURCE_BOTH = "both (equal)"
+
+
+def _reference_for(data: dict) -> dict:
+    """Real data: the Open-Meteo values for this forecast's point, fetched (or read from
+    the 60 min cache) the first time sail_safety needs them, then kept in `data`."""
+    if "reference" not in data:
+        import real_data
+        point = data["sea_point"]
+        data["reference"] = real_data.model_reference(point["lat"], point["lon"],
+                                                      data["forecast"]["daily"])
+    return data["reference"]
+
+
+def _safety_wind(data: dict, d: dict) -> tuple[float, dict, str | None]:
+    """The wind the verdict is based on.
+
+    Dummy data: our estimate, as before (no extra fields).
+    Real data: the HIGHER of our estimate and Open-Meteo for that day (the safer choice),
+    plus which source gave it. If Open-Meteo is not available: our estimate, and it says so.
+    Returns (wind, extra result fields, extra reason or None).
+    """
+    ours = d["wind_max_ms"]
+    if data.get("data_source") != "real":
+        return ours, {}, None
+    reference = _reference_for(data)
+    model_day = next((r for r in reference.get("daily", []) if r["date"] == d["date"]
+                      and r.get("available", True)), None) if reference.get("available") else None
+    model = model_day["wind_max_ms"] if model_day else None
+    if model is None:
+        return ours, {"wind_our_estimate_ms": ours, "wind_open_meteo_ms": None,
+                      "wind_source": WIND_SOURCE_OURS}, \
+            "Open-Meteo is not available, so the verdict uses our estimate only"
+    if model > ours:
+        wind, source = model, WIND_SOURCE_MODEL
+    elif ours > model:
+        wind, source = ours, WIND_SOURCE_OURS
+    else:
+        wind, source = ours, WIND_SOURCE_BOTH
+    reason = (f"the higher max wind of our estimate ({ours} m/s) and the Open-Meteo model "
+              f"({model} m/s) is used: {wind} m/s from {source}")
+    return wind, {"wind_our_estimate_ms": ours, "wind_open_meteo_ms": model,
+                  "wind_source": source}, reason
+
+
 def _sail_safety(data: dict, day: str) -> dict:
     """Sailing verdict for one forecast day, decided by fixed rules (not by the LLM).
 
     Bft <= 4: safe, Bft 5-6: caution, Bft >= 7: not safe.
     A falling pressure trend raises the verdict one level.
+    Real data: the wind is the higher of our estimate and Open-Meteo (_safety_wind).
     """
     forecast = _require_forecast(data)
     days = {d["date"]: d for d in forecast["daily"]}
     if day not in days:
         raise ValueError(f"Unknown day '{day}'. Forecast days: {list(days)}")
     d = days[day]
-    bft = _beaufort(d["wind_max_ms"])
+    wind, wind_fields, wind_reason = _safety_wind(data, d)
+    bft = _beaufort(wind)
     trend = forecast["pressure_trend"]["label"]
 
     if bft <= SAFE_MAX_BFT:
         level = 0
-        reasons = [f"max wind {d['wind_max_ms']} m/s = Beaufort {bft} (up to Bft {SAFE_MAX_BFT} is safe)"]
+        reasons = [f"max wind {wind} m/s = Beaufort {bft} (up to Bft {SAFE_MAX_BFT} is safe)"]
     elif bft <= CAUTION_MAX_BFT:
         level = 1
-        reasons = [f"max wind {d['wind_max_ms']} m/s = Beaufort {bft} (Bft 5-6 means caution)"]
+        reasons = [f"max wind {wind} m/s = Beaufort {bft} (Bft 5-6 means caution)"]
     else:
         level = 2
-        reasons = [f"max wind {d['wind_max_ms']} m/s = Beaufort {bft} (Bft 7 or more is not safe)"]
+        reasons = [f"max wind {wind} m/s = Beaufort {bft} (Bft 7 or more is not safe)"]
+    if wind_reason:
+        reasons.insert(0, wind_reason)
     if trend == "falling":
         reasons.append("pressure is falling, so conditions are worsening")
         if level < 2:
@@ -770,7 +970,7 @@ def _sail_safety(data: dict, day: str) -> dict:
     else:
         reasons.append("pressure is steady, so conditions are stable")
 
-    return {"date": day, "wind_max_ms": d["wind_max_ms"], "beaufort": bft,
+    return {"date": day, "wind_max_ms": wind, **wind_fields, "beaufort": bft,
             "pressure_trend": trend, "pressure_outlook": pressure_outlook(trend),
             "verdict": VERDICTS[level], "reasons": reasons}
 
@@ -804,7 +1004,7 @@ def get_warnings() -> dict:
 
 @_as_json
 def sail_safety(day: str) -> dict:
-    return _sail_safety(_load_forecast_json(), day)
+    return _sail_safety(load_forecast_data(), day)
 
 
 def chat_tool_specs(data: dict | None = None) -> list[dict]:
@@ -820,7 +1020,7 @@ def chat_tool_specs(data: dict | None = None) -> list[dict]:
         _spec("get_station_status",
               "Status (OK/SUSPECT), data issues, distance to the selected point and weight of "
               "the stations. Leave out `station` to get all stations.",
-              {"station": _STATION_PARAM}),
+              {"station": _station_param([st["id"] for st in (data or _load_forecast_json())["stations"]])}),
         _spec("get_warnings", "All warnings for the forecast period at the selected point."),
         _spec("sail_safety",
               "Sailing verdict (safe / caution / not safe) for one day at the selected point, "

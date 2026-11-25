@@ -38,7 +38,11 @@ Python tools do every calculation. The local LLM only picks which tools to call 
 | 18 | Chat: identical tool calls in one question run once (cache keyed by tool + normalized arguments); at most 10 tools executed per question (`MAX_CHAT_TOOL_CALLS`), then calls get a limit error and the model is offered no tools | ✅ Done |
 | 19 | Chat: replies that are offered tools get `max_tokens` 400 (`CHAT_TOOL_MAX_TOKENS`); a repeated call gets "Already called with these arguments. Answer now…" instead of the result again. Slowest question 37 s → 12 s | ✅ Done |
 
-*Last updated: end of step 19.*
+| 20 | Real data: `WEATHER_DATA_SOURCE=real` uses DWD stations via Bright Sky (`real_data.py`: 14 days hourly, km/h → m/s, gaps ≤ 3 h filled, 60 min cache, fallback with "data from <time>"); the 4 nearest usable stations; Open-Meteo shown next to our estimate (comparison only); `forecast.json` records `data_source` and dummy/real are never mixed; offline fixture tests (`test_real_data.py`) | ✅ Done |
+
+| 21 | Real mode: `sail_safety` uses the higher max wind of our estimate and Open-Meteo (fetched on first use, cached) and returns `wind_source`; the chat must name that source. Separate files per data source: `forecast_dummy.json` / `forecast_real.json`, `model_comparison_<source>.json`, real reports in `reports/real/` | ✅ Done |
+
+*Last updated: end of step 21.*
 
 `experiments.py` doesn't change the diagrams. It imports `agent.py`, swaps the task, the system prompt
 or entries in `agent.TOOL_FUNCTIONS`, and redirects `write_report` to `reports/experiment_<scenario>.md`.
@@ -49,17 +53,27 @@ or entries in `agent.TOOL_FUNCTIONS`, and redirects `write_report` to `reports/e
 flowchart LR
     gen["generate_data.py<br/>synthetic data, fixed seed"]
     data[("data/<br/>stations.json<br/>observations.csv")]
+    brightsky(["Bright Sky API<br/>DWD observations"])
+    openmeteo(["Open-Meteo API<br/>model forecast"])
+    real["real_data.py<br/>fetch, convert, select,<br/>cache + fallback"]
+    realdata[("data/real/current/<br/>same files + pool, meta")]
     tools["tools.py<br/>6 tools + TOOL_SPECS<br/>(all calculations)"]
     agent["agent.py<br/>chat + tool-calling loop"]
     llm["Ollama LLM<br/>qwen2.5:7b<br/>localhost:11434/v1"]
-    reports[("reports/<br/>*.md, forecast.json")]
+    reports[("reports/<br/>*.md (real: reports/real/)<br/>forecast_dummy.json, forecast_real.json")]
     app["app.py<br/>FastAPI, 127.0.0.1:8000"]
     chat["chat.py<br/>topic gate + read-only<br/>tool loop + answer checks"]
     web["web/index.html<br/>Leaflet + OSM tiles (dark filter)<br/>Forecast / Ask tabs"]
     browser(["Browser"])
 
     gen -->|writes| data
-    data -->|read only| tools
+    data -->|"read only (dummy)"| tools
+    brightsky -->|"/sources, /weather"| real
+    real -->|"writes (atomic swap)"| realdata
+    realdata -->|"read only (real)"| tools
+    agent -->|"main(): refresh() if real"| real
+    openmeteo -->|"hourly, cached 60 min"| real
+    app -->|"GET /api/reference<br/>(comparison only)"| real
     agent -->|"calls tool(args)"| tools
     tools -->|JSON result| agent
     agent -->|"messages + TOOL_SPECS"| llm
@@ -68,8 +82,8 @@ flowchart LR
     agent -->|"main(): save_forecast_json()"| tools
     compare["compare_models.py<br/>runs agent.MODELS one by one,<br/>ranks runs in code"]
     compare -->|"run_agent_with_stats(task, model)"| agent
-    compare -->|"winner → forecast.json<br/>all runs → model_comparison.json"| reports
-    reports -->|"forecast.json (read only)"| app
+    compare -->|"winner → forecast_&lt;source&gt;.json<br/>all runs → model_comparison_&lt;source&gt;.json"| reports
+    reports -->|"forecast_&lt;source&gt;.json (read only)"| app
     web --> app
     app -->|"GET / and GET /api/forecast"| browser
     browser -->|"click: GET /api/forecast_at"| app
@@ -78,11 +92,11 @@ flowchart LR
     app --> chat
     chat -->|"gate + chat loop"| llm
     chat -->|"read-only chat tools<br/>(sail_safety etc.)"| tools
-    reports -->|"forecast.json"| tools
+    reports -->|"forecast_&lt;source&gt;.json"| tools
 
     classDef done fill:#d4edda,stroke:#28a745,color:#155724
     classDef todo fill:#f1f3f5,stroke:#adb5bd,color:#495057,stroke-dasharray: 5 5
-    class gen,data,tools,reports,agent,llm,app,web,chat,compare done
+    class gen,data,tools,reports,agent,llm,app,web,chat,compare,real,realdata,brightsky,openmeteo done
 ```
 
 **Legend:** green = done, grey dashed = not built yet.
@@ -97,7 +111,17 @@ Notes:
 - `reports/forecast.json` is built by `tools.save_forecast_json()` from tool results only (never LLM text).
   `agent.py` calls it in `main()` after a successful run; experiments never write it.
 - The map page calculates nothing; it only displays `/api/forecast`. `app.py` binds to 127.0.0.1 only.
-- Stations sit on the real Kiel Bay coast (Marstal, Fehmarn, Schönberger Strand, Damp); the weather data is synthetic.
+- Dummy mode (default): stations sit on the real Kiel Bay coast (Marstal, Fehmarn, Schönberger Strand, Damp);
+  the weather data is synthetic.
+- Real mode (`WEATHER_DATA_SOURCE=real`): `tools._data_file()` reads `data/real/current/` instead of `data/`.
+  It's the only switch. `forecast.json` records `data_source`, and every reader refuses a forecast made from the
+  other source (`DataSourceMismatch`), so dummy and real numbers never meet. Clicked points use their own
+  4 nearest pool stations, quality-checked in code. Each source has its own forecast file
+  (`forecast_dummy.json`, `forecast_real.json`) and model comparison, and real reports go to `reports/real/`,
+  so switching modes needs no new agent run.
+- Open-Meteo: the agent never sees it. In real mode `sail_safety` (code) bases the verdict on the HIGHER max wind
+  of our estimate and Open-Meteo and returns `wind_source`; the chat answer must name that source (checked in code).
+  If Open-Meteo is unavailable, the verdict uses our estimate and says so. Dummy mode is unchanged.
 - The chat only gets read-only tools that read `forecast.json` (no `write_report`). The sailing verdict
   comes from `tools.sail_safety()` (Bft ≤ 4 safe, 5–6 caution, ≥ 7 not safe; falling pressure raises it
   one level). The LLM only explains it.

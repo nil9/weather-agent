@@ -8,8 +8,8 @@ Usage:  python compare_models.py [--models qwen2.5:7b qwen2.5:14b]   (default: a
 - Scoring is plain code (rank_runs), no LLM judge:
     1. any failed guardrail  -> disqualified
     2. then fewer tool errors, then fewer steps, then less LLM time
-- The winner's forecast becomes reports/forecast.json (what the map shows).
-- All runs and the ranking are saved to reports/model_comparison.json.
+- The winner's forecast becomes reports/forecast_<data source>.json (what the map shows).
+- All runs and the ranking are saved to reports/model_comparison_<data source>.json.
 """
 import argparse
 import json
@@ -149,10 +149,11 @@ def main():
                                         model=winner["model"])
         print(f"\nWinner: {winner['model']} -> {path}")
     else:
-        print("\nNo valid run: every model failed a guardrail. reports/forecast.json is unchanged.")
+        print("\nNo valid run: every model failed a guardrail. reports/{tools.forecast_file()} is unchanged.")
 
     comparison = {
         "generated_at": pd.Timestamp.now(tz="UTC").strftime("%Y-%m-%dT%H:%M:%SZ"),
+        "data_source": tools.DATA_SOURCE,
         "task": agent.TASK,
         "temperature": agent.TEMPERATURE,
         "scoring_rule": SCORING_RULE,
@@ -164,7 +165,7 @@ def main():
                  | {"forecast": forecast_summary(run["estimate"])}
                  for run in ranked],
     }
-    out = tools._safe_path(tools.REPORTS_DIR, "model_comparison.json")
+    out = tools._safe_path(tools.REPORTS_DIR, tools.comparison_file())
     out.write_text(json.dumps(comparison, indent=2, ensure_ascii=False), encoding="utf-8")
     print(f"Comparison saved: {out.relative_to(tools.BASE_DIR)}")
 

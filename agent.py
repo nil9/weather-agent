@@ -17,7 +17,6 @@ import time
 from openai import APIError, APITimeoutError, OpenAI
 
 import tools
-from tools import TOOL_SPECS
 
 MODEL = "qwen2.5:7b"                     # default: single runs and the chat
 MODELS = ["qwen2.5:7b", "qwen2.5:14b"]   # compared by compare_models.py
@@ -46,8 +45,13 @@ TOOL_FUNCTIONS = {
     "write_report": tools.write_report,
 }
 
+STATIONS_PLACEHOLDER = "{STATIONS}"
+
+# {STATIONS} is filled from the current station list at the start of each run
+# (tools.stations_sentence). With the dummy data it becomes
+# "Four coastal stations (NORTH, EAST, SOUTH, WEST) surround the bay."
 SYSTEM_PROMPT = """You are a marine weather forecaster for a point at sea in a bay.
-Four coastal stations (NORTH, EAST, SOUTH, WEST) surround the bay.
+{STATIONS}
 
 Rules:
 - Use the tools for ALL numbers. Never calculate, estimate or invent numbers yourself.
@@ -211,9 +215,10 @@ def run_agent_with_stats(task: str, model: str | None = None) -> dict:
     tools.reset_state()         # forget the estimate from any earlier run
     # The conversation so far. It grows every step; the LLM sees all of it each time.
     messages = [
-        {"role": "system", "content": SYSTEM_PROMPT},
+        {"role": "system", "content": SYSTEM_PROMPT.replace(STATIONS_PLACEHOLDER, tools.stations_sentence())},
         {"role": "user", "content": task},
     ]
+    tool_specs = tools.tool_specs()      # station enum = the stations of the current data
     failing_tool, fail_count = None, 0   # guardrail 5: consecutive failures of one tool
     prefix_retry_used = False            # one retry if the answer echoes the data label
     deadline = time.monotonic() + MAX_RUN_SECONDS   # total time limit for this run
@@ -233,7 +238,7 @@ def run_agent_with_stats(task: str, model: str | None = None) -> dict:
             response = client.chat.completions.create(
                 model=model,
                 messages=messages,
-                tools=TOOL_SPECS,      # the JSON schemas from tools.py: the LLM's "menu"
+                tools=tool_specs,      # the JSON schemas from tools.py: the LLM's "menu"
                 temperature=TEMPERATURE,
                 max_tokens=MAX_TOKENS,  # stops runaway generation
                 timeout=call_timeout,   # stops a call that hangs (or runs past the limit)
@@ -327,6 +332,13 @@ def run_agent_with_stats(task: str, model: str | None = None) -> dict:
 
 
 def main():
+    print(f"DATA: {tools.DATA_SOURCE}")
+    if tools.DATA_SOURCE == "real":
+        import real_data
+        info = real_data.refresh()       # fetches only if the cache is older than 60 min
+        print(f"Real observations until {info['data_time']} "
+              f"({'fetched now' if info['refreshed'] else 'from cache'})"
+              + (f" - NOTE: {info['data_note']}" if info["data_note"] else ""))
     print(f"TASK: {TASK}")
     answer = run_agent(TASK)
     print("\n=== FINAL ANSWER ===")

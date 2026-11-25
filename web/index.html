@@ -82,6 +82,17 @@
   .station .w.ex { color: var(--bad); font-weight: 600; font-size: 12px; }
 
   .note { color: var(--muted); font-size: 12px; margin-top: 20px; }
+  .note a { color: var(--muted); }
+  .data-badge { display: inline-block; margin-top: 8px; padding: 3px 8px; border-radius: 4px;
+    font-size: 11px; font-weight: 700; letter-spacing: .03em; border: 1px solid var(--muted); color: var(--muted); }
+  .data-badge.real { border-color: #3ddc97; color: #3ddc97; }
+  .data-note { color: var(--orange); font-size: 12px; margin-top: 6px; }
+  .day.ref-day { display: block; }
+  table.ref { width: 100%; border-collapse: collapse; font-size: 12px; margin-top: 6px; }
+  table.ref th { color: var(--muted); font-weight: 600; text-align: right; padding: 2px 4px; }
+  table.ref th:first-child, table.ref td:first-child { text-align: left; color: var(--muted); }
+  table.ref td { text-align: right; padding: 2px 4px; white-space: nowrap; }
+  .ref-note { color: var(--muted); font-size: 11px; margin-top: 4px; }
   .error { color: var(--bad); }
 
   /* Map: popups, labels, sea-point marker */
@@ -391,6 +402,7 @@ function show(data, fit = false) {
   currentData = data;
   drawMap(data, fit);
   drawPanel(data);
+  loadReference(data);                  // real data only: Open-Meteo column, filled when it arrives
 }
 
 // ---------------------------------------------------------------- click: forecast at a point
@@ -436,6 +448,7 @@ function drawPanel(data) {
   const panel = document.getElementById("view-forecast");
   panel.replaceChildren();
   const sp = data.sea_point;
+  drawDataBadge(panel, data);
   panel.append(el("div", "sub", data.selected
     ? `Selected point · ${sp.lat.toFixed(2)}° N, ${sp.lon.toFixed(2)}° E`
     : `${sp.name || "Sea point"} · ${sp.lat.toFixed(2)}° N, ${sp.lon.toFixed(2)}° E`));
@@ -468,9 +481,20 @@ function drawPanel(data) {
 
     // Day cards
     panel.append(el("h2", null, "Next " + f.daily.length + " days"));
-    f.daily.forEach(d => {
+    f.daily.forEach((d, i) => {
       const card = el("div", "day");
-      card.append(el("div", "date", formatDate(d.date)));
+      card.append(el("div", "date", formatDate(d.date) + (d.from_utc ? ` · from ${d.from_utc} UTC` : "")));
+      if (isReal(data)) {                  // our estimate next to the Open-Meteo model
+        card.classList.add("ref-day");
+        card.append(referenceTable(d, f.stations_used.length, referenceDay(data, d.date)));
+        if (d.wind_warning) {
+          const row = el("div", "vals");
+          row.append(el("span", "badge " + warningColor(d.wind_warning), shortWarning(d.wind_warning)));
+          card.append(row);
+        }
+        panel.append(card);
+        return;
+      }
       const row1 = el("div", "vals");
       row1.append(el("span", null, `🌡 ${d.temp_min_c}–${d.temp_max_c} °C`));
       row1.append(el("span", null, `◎ ${d.pressure_mean_hpa} hPa`));
@@ -482,6 +506,7 @@ function drawPanel(data) {
       card.append(row1, row2);
       panel.append(card);
     });
+    if (isReal(data)) panel.append(referenceNote(data));
   }
 
   // Stations
@@ -502,9 +527,100 @@ function drawPanel(data) {
 
   const run = defaultData || data;
   const generated = new Date(run.generated_at).toLocaleString("en-GB", { timeZone: "UTC" });
-  panel.append(el("div", "note",
+  const footer = el("div", "note",
     `Generated ${generated} UTC by agent.py${run.model ? " (" + run.model + ")" : ""} · ` +
-    `Report: ${run.report || "–"} · Synthetic data, for learning only.`));
+    `Report: ${run.report || "–"} · `);
+  if (isReal(data)) {
+    footer.append("Observations: ", link(SOURCES.dwd), " via ", link(SOURCES.brightsky),
+                  " · Model: ", link(SOURCES.openmeteo), " (", link(SOURCES.ccby), ")");
+  } else {
+    footer.append("Synthetic data, for learning only. Real-data mode uses observations from ",
+                  link(SOURCES.dwd), " via ", link(SOURCES.brightsky), " and the ",
+                  link(SOURCES.openmeteo), " model (", link(SOURCES.ccby), ").");
+  }
+  panel.append(footer);
+}
+
+// ---------------------------------------------------------------- data source
+// Dummy (synthetic) or real (DWD via Bright Sky) data, as recorded in forecast.json.
+// The server refuses to mix them; the page only shows which one it is.
+const SOURCES = {
+  dwd: ["Deutscher Wetterdienst (DWD)", "https://www.dwd.de/"],
+  brightsky: ["Bright Sky", "https://brightsky.dev/"],
+  openmeteo: ["Open-Meteo.com", "https://open-meteo.com/"],
+  ccby: ["CC BY 4.0", "https://creativecommons.org/licenses/by/4.0/"],
+};
+const isReal = data => data.data_source === "real";
+const utcTime = iso => new Date(iso).toLocaleString("en-GB",
+  { timeZone: "UTC", day: "numeric", month: "short", hour: "2-digit", minute: "2-digit" }) + " UTC";
+
+function link([text, href]) {
+  const a = el("a", null, text);
+  a.href = href; a.target = "_blank"; a.rel = "noopener";
+  return a;
+}
+
+function drawDataBadge(panel, data) {
+  panel.append(isReal(data)
+    ? el("span", "data-badge real", `REAL DATA · DWD · observations until ${utcTime(data.data_time)}`)
+    : el("span", "data-badge", "DUMMY DATA – synthetic, for learning"));
+  if (data.data_note) panel.append(el("div", "data-note", "⚠ " + data.data_note));
+}
+
+// Open-Meteo values for the shown point (/api/reference), loaded after the forecast.
+// Comparison only: the agent and the chat never see them.
+let reference = null;                  // {key, body}
+
+const pointKey = data => `${data.sea_point.lat},${data.sea_point.lon}`;
+
+async function loadReference(data) {
+  if (!isReal(data)) return;
+  const key = pointKey(data);
+  reference = { key, body: null };
+  let body;
+  try {
+    const r = await fetch(`/api/reference?lat=${data.sea_point.lat}&lon=${data.sea_point.lon}`);
+    body = r.ok ? await r.json() : { available: false, reason: "Open-Meteo not available" };
+  } catch (err) {
+    body = { available: false, reason: "Open-Meteo not available" };
+  }
+  if (!reference || reference.key !== key) return;      // the user picked another point meanwhile
+  reference.body = body;
+  if (currentData && pointKey(currentData) === key) drawPanel(currentData);
+}
+
+function referenceDay(data, date) {
+  if (!reference || reference.key !== pointKey(data)) return undefined;   // still loading
+  if (!reference.body) return undefined;
+  if (!reference.body.available) return null;
+  return reference.body.daily.find(r => r.date === date && r.available !== false) || null;
+}
+
+function referenceTable(d, nStations, ref) {
+  const table = el("table", "ref");
+  const head = el("tr");
+  [" ", `Our estimate (${nStations} stations)`, "Open-Meteo model"].forEach(h => head.append(el("th", null, h)));
+  table.append(head);
+  const other = (fmt) => ref === undefined ? "…" : ref === null ? "–" : fmt(ref);
+  [["🌡 Temp", r => `${r.temp_min_c}–${r.temp_max_c} °C`],
+   ["💨 Max wind", r => `${r.wind_max_ms} m/s`],
+   ["◎ Pressure", r => `${r.pressure_mean_hpa} hPa`]].forEach(([label, fmt]) => {
+    const row = el("tr");
+    row.append(el("td", null, label), el("td", null, fmt(d)), el("td", null, other(fmt)));
+    table.append(row);
+  });
+  return table;
+}
+
+function referenceNote(data) {
+  const body = reference && reference.key === pointKey(data) ? reference.body : null;
+  if (!body) return el("div", "ref-note", "Loading Open-Meteo…");
+  if (!body.available) return el("div", "ref-note", body.reason || "Open-Meteo not available");
+  const note = el("div", "ref-note",
+    `Open-Meteo: model grid point ${body.grid_point.lat.toFixed(2)}° N, ${body.grid_point.lon.toFixed(2)}° E, ` +
+    `same hours as our forecast. Comparison only, not used by the agent.`);
+  if (body.data_note) note.append(el("div", "data-note", "⚠ Open-Meteo " + body.data_note));
+  return note;
 }
 
 // ---------------------------------------------------------------- model comparison
@@ -545,6 +661,12 @@ fetch("/api/forecast")
   })
   .then(async data => {
     defaultData = data;
+    if (isReal(data)) {
+      map.attributionControl.addAttribution(
+        'Observations: <a href="https://www.dwd.de/">DWD</a> via <a href="https://brightsky.dev/">Bright Sky</a>');
+      map.attributionControl.addAttribution(
+        'Model: <a href="https://open-meteo.com/">Open-Meteo.com</a> (<a href="https://creativecommons.org/licenses/by/4.0/">CC BY 4.0</a>)');
+    }
     try {                                   // optional: only exists after compare_models.py
       const r = await fetch("/api/model_comparison");
       if (r.ok) comparison = await r.json();

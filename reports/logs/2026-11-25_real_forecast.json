@@ -1,0 +1,99 @@
+{
+  "generated_at": "2026-11-25T19:55:59Z",
+  "sea_point": {
+    "id": "SEA",
+    "name": "Kiel Bay (open water)",
+    "lat": 54.55,
+    "lon": 10.45
+  },
+  "stations": [
+    {
+      "id": "KIEL-HOLTENAU",
+      "name": "Kiel-Holtenau",
+      "lat": 54.3776,
+      "lon": 10.1424,
+      "distance_km": 27.6,
+      "status": "OK",
+      "issues": [],
+      "weight": 0.359
+    },
+    {
+      "id": "SCHOENHAGEN",
+      "name": "Schönhagen (Ostseebad)",
+      "lat": 54.641,
+      "lon": 10.0238,
+      "distance_km": 29.3,
+      "status": "OK",
+      "issues": [],
+      "weight": 0.319
+    },
+    {
+      "id": "FEHMARN",
+      "name": "Fehmarn",
+      "lat": 54.5283,
+      "lon": 11.0606,
+      "distance_km": 39.5,
+      "status": "OK",
+      "issues": [],
+      "weight": 0.176
+    },
+    {
+      "id": "DOERNICK",
+      "name": "Dörnick",
+      "lat": 54.1654,
+      "lon": 10.3519,
+      "distance_km": 43.2,
+      "status": "OK",
+      "issues": [],
+      "weight": 0.146
+    }
+  ],
+  "forecast": {
+    "daily": [
+      {
+        "date": "2026-11-25",
+        "from_utc": "20:00",
+        "temp_min_c": 0.7,
+        "temp_max_c": 1.2,
+        "pressure_mean_hpa": 1025.6,
+        "wind_max_ms": 5.0,
+        "wind_warning": null
+      },
+      {
+        "date": "2026-11-26",
+        "temp_min_c": 0.5,
+        "temp_max_c": 3.4,
+        "pressure_mean_hpa": 1025.2,
+        "wind_max_ms": 5.8,
+        "wind_warning": null
+      },
+      {
+        "date": "2026-11-27",
+        "temp_min_c": 0.8,
+        "temp_max_c": 3.6,
+        "pressure_mean_hpa": 1025.2,
+        "wind_max_ms": 5.8,
+        "wind_warning": null
+      }
+    ],
+    "pressure_trend": {
+      "label": "steady",
+      "change_hpa": -0.4,
+      "from_hpa": 1025.6,
+      "to_hpa": 1025.2
+    },
+    "warnings": [],
+    "stations_used": [
+      "KIEL-HOLTENAU",
+      "SCHOENHAGEN",
+      "FEHMARN",
+      "DOERNICK"
+    ]
+  },
+  "unavailable_reason": null,
+  "report": "reports/forecast_report.md",
+  "model": "qwen2.5:7b",
+  "data_source": "real",
+  "data_time": "2026-11-25T19:00:00Z",
+  "data_note": null
+}
