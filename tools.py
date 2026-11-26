@@ -862,7 +862,20 @@ def _get_forecast(data: dict, day: str | list[str] | None = None) -> dict:
             raise ValueError(f"Unknown day(s) {unknown}. Forecast days: {forecast_dates(data)}")
         daily = [row for row in daily if row["date"] in wanted]
     point = data["sea_point"]
-    return {"point": point["name"], "lat": point["lat"], "lon": point["lon"], "daily": daily,
+    extra = {}
+    if data.get("data_source") == "real":
+        # Real data: the Open-Meteo model values for the same hours, next to our estimate.
+        reference = _reference_for(data)
+        model = {r["date"]: r for r in reference.get("daily", []) if r.get("available", True)} \
+            if reference.get("available") else {}
+        keep = ["temp_min_c", "temp_max_c", "pressure_mean_hpa", "wind_max_ms"]
+        daily = [{**row, "open_meteo": ({**{k: model[row["date"]][k] for k in keep},
+                                         "wind_max_beaufort": _beaufort(model[row["date"]]["wind_max_ms"])}
+                                        if row["date"] in model else None)} for row in daily]
+        extra = {"values_are": "our estimate from the stations; open_meteo = the Open-Meteo model",
+                 **({} if reference.get("available") else
+                    {"open_meteo_note": reference.get("reason", "Open-Meteo not available")})}
+    return {"point": point["name"], "lat": point["lat"], "lon": point["lon"], "daily": daily, **extra,
             "pressure_trend": forecast["pressure_trend"],
             "pressure_outlook": pressure_outlook(forecast["pressure_trend"]["label"])}
 

@@ -169,7 +169,10 @@
               border-bottom-left-radius: 4px; }
   .msg.bot.thinking { color: var(--muted); font-style: italic; }
   .msg.error { color: var(--bad); }
-  .msg .tools { color: var(--muted); font-size: 11px; margin-top: 6px; white-space: normal; }
+  .msg details.tools { color: var(--muted); font-size: 11px; margin-top: 6px; white-space: normal; }
+  .msg details.tools summary { cursor: pointer; width: fit-content; }
+  .msg details.tools summary:focus-visible { outline: 1px solid var(--muted); outline-offset: 2px; }
+  .msg details.tools div { margin-top: 4px; }
   .msg .badges { margin-top: 8px; }
   .badge.green { background: var(--ok); }
   .empty { color: var(--muted); font-size: 13px; }
@@ -228,7 +231,7 @@
                autocomplete="off" aria-label="Your question">
         <button type="submit" id="chat-send">Send</button>
       </form>
-      <div class="disclaimer">Dummy data, not navigation advice.</div>
+      <div class="disclaimer" id="disclaimer"></div>
     </section>
   </aside>
 </div>
@@ -674,6 +677,7 @@ fetch("/api/forecast")
     drawArea(data);
     show(data, true);
     pointChanged();
+    setupChat(data);
   })
   .catch(err => {
     document.getElementById("view-forecast").replaceChildren(
@@ -696,7 +700,15 @@ TABS.forEach(([tab]) => document.getElementById(tab).addEventListener("click", (
 // The answer text comes from the LLM: it is always inserted as text, never as HTML.
 // Verdict badges come from the sail_safety tool (code), not from the LLM's words.
 const VERDICT_COLOR = { "safe": "green", "caution": "yellow", "not safe": "red" };
-const SUGGESTIONS = ["Is it safe to sail tomorrow?", "Why is EAST excluded?", "Max wind on Friday?"];
+// Chips and the note depend on the data source (test_chat.py reads both chip lists from here).
+const SUGGESTIONS = {
+  dummy: ["Is it safe to sail tomorrow?", "Why is EAST excluded?", "Max wind on Friday?"],
+  real: ["Is it safe to sail tomorrow?", "Which station counts most?", "How does our wind compare to Open-Meteo?"],
+};
+const DISCLAIMER = {
+  dummy: "Dummy data, not navigation advice.",
+  real: "Real observations (DWD) and model data (Open-Meteo). Not navigation advice.",
+};
 const MAX_HISTORY = 6;
 const chatHistory = [];               // [{role, content}], sent along for follow-up questions
 const chatLog = document.getElementById("chat-log");
@@ -748,7 +760,11 @@ async function ask(question) {
       msg.append(badges);
     }
     if (body.tools_used.length) {
-      msg.append(el("div", "tools", "tools: " + body.tools_used.map(describeTool).join(", ")));
+      // Which tools ran: for the curious, closed by default (internal names stay out of the answer).
+      const details = el("details", "tools");
+      details.append(el("summary", null, "Details"),
+                     el("div", null, "tools: " + body.tools_used.map(describeTool).join(", ")));
+      msg.append(details);
     }
     chatHistory.push({ role: "user", content: question }, { role: "assistant", content: body.answer });
     chatLog.scrollTop = chatLog.scrollHeight;
@@ -777,12 +793,19 @@ document.getElementById("chat-form").addEventListener("submit", e => {
   e.preventDefault();
   ask(chatInput.value);
 });
-SUGGESTIONS.forEach(q => {
-  const chip = el("button", null, q);
-  chip.type = "button";
-  chip.addEventListener("click", () => ask(q));
-  document.getElementById("chips").append(chip);
-});
+// Called once the forecast is loaded, so the chips and note match its data source.
+function setupChat(data) {
+  const source = isReal(data) ? "real" : "dummy";
+  document.getElementById("disclaimer").textContent = DISCLAIMER[source];
+  const chips = document.getElementById("chips");
+  chips.replaceChildren();
+  SUGGESTIONS[source].forEach(q => {
+    const chip = el("button", null, q);
+    chip.type = "button";
+    chip.addEventListener("click", () => ask(q));
+    chips.append(chip);
+  });
+}
 </script>
 </body>
 </html>

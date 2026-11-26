@@ -80,7 +80,8 @@ The **Ask** tab is a chat about this forecast, e.g. "Is it safe to sail tomorrow
 excluded?". The LLM only has read-only tools. Whether sailing is safe / caution / not safe is
 decided in code (`sail_safety`: wind in Beaufort plus pressure trend), and the LLM explains it.
 Questions about other topics get "I can only answer about this forecast." Dummy data, not
-navigation advice. Run `python test_chat.py` to check the chat against a fixed set of questions.
+navigation advice. Run `python test_chat.py` to check the chat against a fixed set of questions
+in both data modes (`--source dummy` or `--source real` for one).
 
 ## Files
 
@@ -95,7 +96,7 @@ navigation advice. Run `python test_chat.py` to check the chat against a fixed s
 | `test_tools.py` | Calls each tool once and prints the result |
 | `app.py` | Small FastAPI server (localhost only): the map page at `/`, the forecast JSON at `/api/forecast`, a clicked point at `/api/forecast_at`, the chat at `POST /api/chat` |
 | `chat.py` | Chat logic: topic gate, read-only tool loop, answer checks (numbers, verdicts, required tools) |
-| `test_chat.py` | Chat regression tests: all suggestion chips, 12 normal questions, 5 off-topic questions, 3 questions for a clicked point; answers checked against the tools (`--runs N`) |
+| `test_chat.py` | Chat regression tests in both data modes: the chips and note of each mode, normal, off-topic, clicked-point and regression questions; answers checked against the tools, no internal names or ISO dates, verdicts only for the named days (`--runs N`, `--source dummy/real/both`) |
 | `web/index.html` | The map page: Leaflet + OpenStreetMap tiles with a dark CSS filter (no API key), Forecast / Ask tabs |
 | `compare_models.py` | Runs the agent with each model in `agent.MODELS` one after another, ranks the runs in code, saves the winner to `forecast_<source>.json` and all runs to `model_comparison_<source>.json` |
 | `test_compare.py` | Tests the ranking rules (no LLM needed) |
@@ -105,38 +106,11 @@ navigation advice. Run `python test_chat.py` to check the chat against a fixed s
 
 ## Architecture
 
-```mermaid
-flowchart LR
-    gen["generate_data.py<br/>synthetic data, fixed seed"]
-    data[("data/<br/>stations.json<br/>observations.csv")]
-    tools["tools.py<br/>6 tools + TOOL_SPECS<br/>(all calculations)"]
-    agent["agent.py<br/>chat + tool-calling loop"]
-    llm["Ollama LLM<br/>qwen2.5:7b<br/>localhost:11434/v1"]
-    reports[("reports/<br/>*.md, forecast_dummy.json,<br/>forecast_real.json")]
-    app["app.py<br/>FastAPI, 127.0.0.1:8000"]
-    web["web/index.html<br/>Leaflet map + chat"]
-    chat["chat.py<br/>read-only chat"]
-    browser(["Browser"])
-
-    gen -->|writes| data
-    data -->|read only| tools
-    agent -->|"calls tool(args)"| tools
-    tools -->|JSON result| agent
-    agent -->|"messages + TOOL_SPECS"| llm
-    llm -->|"tool_calls or final text"| agent
-    tools -->|"write_report (path-checked)"| reports
-    reports -->|"forecast_&lt;source&gt;.json (read only)"| app
-    web --> app
-    app -->|"GET / and GET /api/forecast"| browser
-    browser -->|"POST /api/chat"| app
-    app --> chat
-    chat -->|"gate + chat loop"| llm
-    chat -->|"read-only tools"| tools
-```
+Diagrams (components, data sources, one agent run) and the build progress are in
+[docs/architecture.md](docs/architecture.md).
 
 The LLM never runs code or touches files. It only *asks* for a tool call, and `agent.py` runs
 the real Python function and sends the JSON result back. Tools may only read `data/` and write
 `reports/`. Important safety rules live in code, not just in the prompt: tools refuse
 unreliable stations, the loop won't accept a final answer until a report is saved, and it stops
-when a tool keeps failing. See [docs/architecture.md](docs/architecture.md) for the sequence diagram of one run
-and the build progress.
+when a tool keeps failing.

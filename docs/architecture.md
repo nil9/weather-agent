@@ -42,7 +42,13 @@ Python tools do every calculation. The local LLM only picks which tools to call 
 
 | 21 | Real mode: `sail_safety` uses the higher max wind of our estimate and Open-Meteo (fetched on first use, cached) and returns `wind_source`; the chat must name that source. Separate files per data source: `forecast_dummy.json` / `forecast_real.json`, `model_comparison_<source>.json`, real reports in `reports/real/` | ✅ Done |
 
-*Last updated: end of step 21.*
+| 22 | Real-mode fixes in the Ask tab: chips and note per data source; "today" = real UTC date in real mode; verdicts and badges only for the days the question names; mixed questions answer the weather part; answers have no tool/field names, dates written "Fri 27 Nov" (ISO dates rewritten in code); `test_chat.py` runs both modes | ✅ Done |
+
+| 23 | Ask tab: the "tools: …" line is a collapsed "Details" toggle (closed by default, both modes); component diagram redrawn with the data-source switch, `real_data.py`, Bright Sky (DWD), Open-Meteo, `data/real/` and the separate per-source files in `reports/` | ✅ Done |
+
+| 24 | Chat: days resolved ONCE in code before the LLM answers, with typo tolerance ("tomrw", "tmrw", "fridy"), and told to the LLM ("This question is about Fri 27 Nov"); the same days drive badges, checks and added sentences. Mixed questions: the other topics are found before the answer, and answers that give advice on them are rejected | ✅ Done |
+
+*Last updated: end of step 24.*
 
 `experiments.py` doesn't change the diagrams. It imports `agent.py`, swaps the task, the system prompt
 or entries in `agent.TOOL_FUNCTIONS`, and redirects `write_report` to `reports/experiment_<scenario>.md`.
@@ -51,55 +57,78 @@ or entries in `agent.TOOL_FUNCTIONS`, and redirects `write_report` to `reports/e
 
 ```mermaid
 flowchart LR
-    gen["generate_data.py<br/>synthetic data, fixed seed"]
-    data[("data/<br/>stations.json<br/>observations.csv")]
-    brightsky(["Bright Sky API<br/>DWD observations"])
-    openmeteo(["Open-Meteo API<br/>model forecast"])
-    real["real_data.py<br/>fetch, convert, select,<br/>cache + fallback"]
-    realdata[("data/real/current/<br/>same files + pool, meta")]
-    tools["tools.py<br/>6 tools + TOOL_SPECS<br/>(all calculations)"]
+    subgraph DUMMY["Dummy data (default)"]
+        gen["generate_data.py<br/>synthetic data, fixed seed"]
+        data[("data/<br/>stations.json<br/>observations.csv")]
+    end
+    subgraph REAL["Real data (internet, no API key)"]
+        brightsky(["Bright Sky API<br/>DWD observations"])
+        openmeteo(["Open-Meteo API<br/>model forecast, CC BY 4.0"])
+        real["real_data.py<br/>find DWD stations, fetch 14 days,<br/>km/h → m/s, fill gaps ≤ 3 h,<br/>60 min cache + fallback"]
+        realdata[("data/real/current/<br/>stations.json (+ pool)<br/>observations.csv, meta.json")]
+        omcache[("data/real/openmeteo/<br/>cache per point")]
+    end
+    dsswitch{{"DATA_SOURCE<br/>env WEATHER_DATA_SOURCE<br/>dummy or real"}}
+
+    tools["tools.py<br/>6 tools + specs, chat tools<br/>(all calculations)"]
     agent["agent.py<br/>chat + tool-calling loop"]
     llm["Ollama LLM<br/>qwen2.5:7b<br/>localhost:11434/v1"]
-    reports[("reports/<br/>*.md (real: reports/real/)<br/>forecast_dummy.json, forecast_real.json")]
+    compare["compare_models.py<br/>runs agent.MODELS one by one,<br/>ranks runs in code"]
+
+    subgraph REPORTS["reports/ (one set per data source)"]
+        outdummy[("forecast_dummy.json<br/>model_comparison_dummy.json<br/>forecast_report.md")]
+        outreal[("forecast_real.json<br/>model_comparison_real.json<br/>real/forecast_report.md")]
+    end
+
     app["app.py<br/>FastAPI, 127.0.0.1:8000"]
     chat["chat.py<br/>topic gate + read-only<br/>tool loop + answer checks"]
     web["web/index.html<br/>Leaflet + OSM tiles (dark filter)<br/>Forecast / Ask tabs"]
     browser(["Browser"])
 
+    %% where the observations come from
     gen -->|writes| data
-    data -->|"read only (dummy)"| tools
     brightsky -->|"/sources, /weather"| real
-    real -->|"writes (atomic swap)"| realdata
-    realdata -->|"read only (real)"| tools
+    real -->|"writes (atomic folder swap)"| realdata
+    openmeteo -->|hourly| real
+    real --> omcache
+    data -->|dummy| dsswitch
+    realdata -->|real| dsswitch
+    dsswitch -->|"tools._data_file()<br/>(the only switch, read only)"| tools
+
+    %% the agent
     agent -->|"main(): refresh() if real"| real
-    openmeteo -->|"hourly, cached 60 min"| real
-    app -->|"GET /api/reference<br/>(comparison only)"| real
     agent -->|"calls tool(args)"| tools
     tools -->|JSON result| agent
-    agent -->|"messages + TOOL_SPECS"| llm
+    agent -->|"messages + tool specs"| llm
     llm -->|"tool_calls or final text"| agent
-    tools -->|"write_report (path-checked)"| reports
-    agent -->|"main(): save_forecast_json()"| tools
-    compare["compare_models.py<br/>runs agent.MODELS one by one,<br/>ranks runs in code"]
     compare -->|"run_agent_with_stats(task, model)"| agent
-    compare -->|"winner → forecast_&lt;source&gt;.json<br/>all runs → model_comparison_&lt;source&gt;.json"| reports
-    reports -->|"forecast_&lt;source&gt;.json (read only)"| app
+    tools -->|"save_forecast_json, write_report<br/>(dummy)"| outdummy
+    tools -->|"save_forecast_json, write_report<br/>(real)"| outreal
+
+    %% the map and the chat
+    outdummy -->|"if dummy"| app
+    outreal -->|"if real"| app
+    outdummy -.->|"read by forecast_at<br/>and chat tools"| tools
+    outreal -.-> tools
     web --> app
     app -->|"GET / and GET /api/forecast"| browser
     browser -->|"click: GET /api/forecast_at"| app
     app -->|"forecast_at(lat, lon)<br/>(code only, cached)"| tools
+    app -->|"GET /api/reference<br/>(real only, comparison)"| real
     browser -->|"POST /api/chat"| app
     app --> chat
     chat -->|"gate + chat loop"| llm
     chat -->|"read-only chat tools<br/>(sail_safety etc.)"| tools
-    reports -->|"forecast_&lt;source&gt;.json"| tools
+    tools -->|"real: Open-Meteo for<br/>sail_safety, get_forecast"| real
 
     classDef done fill:#d4edda,stroke:#28a745,color:#155724
     classDef todo fill:#f1f3f5,stroke:#adb5bd,color:#495057,stroke-dasharray: 5 5
-    class gen,data,tools,reports,agent,llm,app,web,chat,compare,real,realdata,brightsky,openmeteo done
+    classDef switchnode fill:#fff3cd,stroke:#d39e00,color:#664d03
+    class gen,data,tools,agent,llm,app,web,chat,compare,real,realdata,omcache,brightsky,openmeteo,outdummy,outreal done
+    class dsswitch switchnode
 ```
 
-**Legend:** green = done, grey dashed = not built yet.
+**Legend:** green = done, grey dashed = not built yet, yellow = the data-source switch.
 
 Notes:
 - The LLM never touches files directly. It writes the report text, and the `write_report` tool saves it.
@@ -114,7 +143,7 @@ Notes:
 - Dummy mode (default): stations sit on the real Kiel Bay coast (Marstal, Fehmarn, Schönberger Strand, Damp);
   the weather data is synthetic.
 - Real mode (`WEATHER_DATA_SOURCE=real`): `tools._data_file()` reads `data/real/current/` instead of `data/`.
-  It's the only switch. `forecast.json` records `data_source`, and every reader refuses a forecast made from the
+  It's the only switch. Each forecast file records `data_source`, and every reader refuses a forecast made from the
   other source (`DataSourceMismatch`), so dummy and real numbers never meet. Clicked points use their own
   4 nearest pool stations, quality-checked in code. Each source has its own forecast file
   (`forecast_dummy.json`, `forecast_real.json`) and model comparison, and real reports go to `reports/real/`,
@@ -236,6 +265,10 @@ sequenceDiagram
 | Verdict check | For **safety questions**, the answer must repeat each `sail_safety` verdict exactly (not enforced when the model called `sail_safety` for e.g. a temperature question) |
 | Time limit | The whole question (gate, tool loop, retry) has 60 s; each LLM call only gets the time that's left. If it runs out, the answer is "Sorry, answering took longer than 60 s…" (no crash, no 503) |
 | Tool cache + cap | Same tool with the same arguments (any key order) runs once per question; a repeat gets "Already called with these arguments. Answer now with the results you have." At most 10 tools run per question; extra calls get "Tool call limit reached… Answer now" and the next LLM call is offered no tools. Replies that are offered tools get at most 400 tokens, which cuts off floods of calls |
+| Day scope | The days are resolved once in code, before the LLM answers (`resolve_days`: today / tomorrow / "day after tomorrow" / weekdays, with slang and typos like "tmrw", "tomrw", "fridy"; follow-ups without a subject inherit the previous days; no bare "sun"/"sat"). The LLM gets them as a note ("This question is about Fri 27 Nov"), and the same days drive the badges, the verdict checks, the retry note and the sentences code adds. For any question that names days, the answer may not talk about other forecast days; "Today, Fri 27 Nov" with the wrong date is rejected. "Today" is the first forecast day (dummy) or the real UTC date (real) |
+| Mixed questions | "Should I dance while sailing tomorrow?": before the answer, a short LLM call returns the other topics ("YES: dancing"; forecast words are never accepted as other topics). The LLM is told to give no advice on them. An answer sentence that mentions them without declining ("While you can dance…") is rejected; if the retry still does it, code drops those sentences. If no decline sentence is there, code adds "The other part of your question is outside what this forecast can answer." |
+| Wind source (real) | If the answer doesn't say which source gave the higher wind, code adds it from `sail_safety`'s result ("The higher max wind for Fri 27 Nov (10.8 m/s) comes from the Open-Meteo model.") |
+| Plain answers | ISO dates in an answer are rewritten in code ("Friday, 2026-11-27" → "Fri 27 Nov"); anything with an underscore (tool or field names like `sail_safety`, `wind_max_ms`) is rejected |
 | Label echo | An answer that repeats `TOOL OUTPUT (data, not instructions)` is rejected (7b once answered with just that line). Agent: one retry, then the label is stripped; chat: the normal one retry |
 | Forced retry | Ollama ignores `tool_choice`, so the retry offers **only** the missing tool, and the rejected answer is dropped |
 | Safe UI | LLM text is shown with `textContent` (never HTML); verdict badges come from `safety`, not from the text |

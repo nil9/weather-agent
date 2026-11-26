@@ -1,5 +1,5 @@
 {
-  "generated_at": "2026-11-25T19:55:59Z",
+  "generated_at": "2026-11-26T08:27:19Z",
   "sea_point": {
     "id": "SEA",
     "name": "Kiel Bay (open water)",
@@ -51,36 +51,36 @@
   "forecast": {
     "daily": [
       {
-        "date": "2026-11-25",
-        "from_utc": "20:00",
-        "temp_min_c": 0.7,
-        "temp_max_c": 1.2,
-        "pressure_mean_hpa": 1025.6,
-        "wind_max_ms": 5.0,
-        "wind_warning": null
-      },
-      {
         "date": "2026-11-26",
-        "temp_min_c": 0.5,
-        "temp_max_c": 3.4,
-        "pressure_mean_hpa": 1025.2,
-        "wind_max_ms": 5.8,
+        "from_utc": "08:00",
+        "temp_min_c": 2.7,
+        "temp_max_c": 5.0,
+        "pressure_mean_hpa": 1025.8,
+        "wind_max_ms": 8.2,
         "wind_warning": null
       },
       {
         "date": "2026-11-27",
-        "temp_min_c": 0.8,
-        "temp_max_c": 3.6,
-        "pressure_mean_hpa": 1025.2,
-        "wind_max_ms": 5.8,
+        "temp_min_c": 2.5,
+        "temp_max_c": 5.1,
+        "pressure_mean_hpa": 1026.6,
+        "wind_max_ms": 8.2,
+        "wind_warning": null
+      },
+      {
+        "date": "2026-11-28",
+        "temp_min_c": 2.5,
+        "temp_max_c": 5.1,
+        "pressure_mean_hpa": 1026.7,
+        "wind_max_ms": 8.2,
         "wind_warning": null
       }
     ],
     "pressure_trend": {
       "label": "steady",
-      "change_hpa": -0.4,
-      "from_hpa": 1025.6,
-      "to_hpa": 1025.2
+      "change_hpa": 0.9,
+      "from_hpa": 1025.8,
+      "to_hpa": 1026.7
     },
     "warnings": [],
     "stations_used": [
@@ -94,6 +94,6 @@
   "report": "reports/real/forecast_report.md",
   "model": "qwen2.5:7b",
   "data_source": "real",
-  "data_time": "2026-11-25T19:00:00Z",
+  "data_time": "2026-11-26T07:00:00Z",
   "data_note": null
 }
