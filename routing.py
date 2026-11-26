@@ -1,80 +1,135 @@
-"""Sea routing, phase 1: the shortest WATER route between two points (code only, no LLM).
+"""Sea routing: the shortest WATER route between two points (code only, no LLM).
+
+Phase 1: land.  Phase 2: water depth, restricted zones, safety buffers, detour explanation.
 
 How it works:
-  1. Grid: ~1 km squares over Kiel Bay (ROUTE_BBOX), in the same local km grid as the
+  1. Grid: 0.25 km squares over Kiel Bay (ROUTE_BBOX), in the same local km grid as the
      land/sea check (tools._to_km). A square is water only if it doesn't touch the land
      polygons at all (data/land_kiel_bay.geojson, unshrunk).
-  2. Snap: each clicked point goes to the nearest water square (at most MAX_SNAP_KM away).
-  3. A*: 8 neighbours; a diagonal step only if both side squares are water too, so every
-     step stays inside water squares. Heuristic: straight-line distance.
-  4. Smooth: the grid zigzag is straightened ("string pulling") wherever the straight line
-     keeps SAFETY_MARGIN_KM away from land.
-  5. Distance in km and nm, ETA for the chosen speed.
+  2. Rules (all vectorised with numpy, see Rules):
+       - depth: draft + margin at every square centre, and along every step between two
+         centres (sampled every 50 m in the ~100 m EMODnet depth grid)
+       - zones: squares touching a blocked zone are unusable; penalty zones cost extra
+       - buffers: square centres and steps keep land_buffer from land and zone_buffer from
+         blocked zones (distance rasters from a distance transform of the depth grid)
+     A step between two usable squares is allowed only if it passes every rule along its
+     whole length, so the route can't cut a corner across land, shallows or zones.
+  3. Only the largest connected usable area is used (scipy connected components), and each
+     clicked point snaps to its nearest usable square (at most MAX_SNAP_KM away). A rejected
+     click gets the exact reason (land, depth with values, zone name, buffer).
+  4. Search: Dijkstra on the step graph (scipy, C speed). Edge cost = step length + penalties,
+     so the result is the cheapest route (the shortest one if no penalty zone is involved).
+  5. Smooth: the grid zigzag is straightened ("string pulling") where the straight line
+     passes the same rules (sampled along it) and stays off the land polygons.
+  6. Distance in km and nm, ETA, minimum depth and distances to land / zones along the route.
+  explain() routes the same trip 4 times (land only, + depth, + zones, + buffers), so the
+  extra km of each rule show which one caused the detour. The chat uses it too.
 
-Cost function: edge cost = step length (km) + the extra cost of every term in COST_TERMS.
-Phase 1 has no terms. Later phases add terms without touching the search:
-  - depth (EMODnet Bathymetry): blocked() for squares that are too shallow
-  - restricted zones: blocked() and segment_ok() for the zones
-  - weather (Open-Meteo grid, wind + waves): extra() from the forecast at the ARRIVAL time
-    (ctx.departure + g / speed), i.e. time-dependent
-  - traffic (EMODnet vessel density): extra() for busy lanes
-Every extra() must be >= 0, so the straight-line heuristic stays admissible (A* stays exact).
+Cost terms: custom terms with blocked(cell) / extra(a, b, ...) / segment_ok(p, q) still work
+(the tests use them), but they are evaluated square by square in Python, so they are slow.
+Later phases (weather at the arrival time, traffic density) become vectorised rules like
+the zone penalty: an extra cost per step, always >= 0.
 """
+import base64
 import functools
-import heapq
+import json
+import logging
 import math
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from datetime import datetime
-from typing import Protocol
 
 import numpy as np
 import shapely
-from shapely.geometry import LineString
+from scipy.ndimage import distance_transform_edt
+from scipy.sparse import csr_matrix
+from scipy.sparse.csgraph import connected_components, dijkstra
+from shapely.geometry import LineString, Point, shape
+from shapely.ops import unary_union
 from shapely.prepared import prep
 
 import tools
 
 ROUTE_BBOX = (9.8, 54.15, 11.6, 55.15)   # lon_min, lat_min, lon_max, lat_max (Kiel Bay + Fehmarn)
-CELL_KM = 1.0                            # grid resolution
-MAX_SNAP_KM = 5.0                        # a click farther than this from water is rejected
-SAFETY_MARGIN_KM = 0.2                   # smoothed lines keep at least this far from land
+CELL_KM = 0.25                           # grid resolution (0.25 km opens the Fehmarnsund)
+MAX_SNAP_KM = 5.0                        # a click farther than this from usable water is rejected
+SNAP_WARN_KM = 0.5                       # a click moved farther than this gets a visible warning
 KM_PER_NM = 1.852
 DEFAULT_SPEED_KN = 6.0
 STEPS = [(-1, -1), (-1, 0), (-1, 1), (0, -1), (0, 1), (1, -1), (1, 0), (1, 1)]   # (row, col)
+BASE_STEPS = [(0, 1), (1, 0), (1, 1), (1, -1)]    # the other 4 are the same steps reversed
+
+# --- rule settings (defaults; the Route tab can change them) -------------------
+DRAFT_M = 2.0                            # the boat's draft
+SAFETY_MARGIN_M = 1.0                    # extra water under the keel (water level, data errors)
+LAND_BUFFER_M = 300                      # keep at least this far from land
+ZONE_BUFFER_M = 500                      # keep at least this far from blocked zones
+SAMPLE_KM = 0.02                         # rules are checked every 20 m along steps and lines
+                                         # (finer than the ~67 m depth pixels, so none is skipped)
+RASTER_TOL_KM = 0.07                     # distance rasters have ~100 m pixels: this is added to
+                                         # a buffer, so the real distance is at least the buffer
+# What each zone category means for the route: "block", "penalty" or "ignore".
+# "firing" and "restricted" follow the user's choice (block / penalty); see zone_rules().
+ZONE_RULES = {"no_entry": "block", "firing": "block", "restricted": "block", "exercise": "ignore"}
+ZONE_PENALTY = 10.0                      # penalty mode (default): each km inside a zone costs 10 km extra
+PENALTY_RANGE = (0.0, 20.0)              # the Route tab may set the factor in this range
+                                         # (0 = penalty zones cost nothing, but are still listed)
+NOISE_KM = 0.2                           # breakdown steps within +-0.2 km are grid / straightening noise
+TINY_ZONE_KM2 = 0.01                     # unnamed zones smaller than 1 ha: blocked, but no buffer
+# Named narrow passages (lon/lat polygons). Inside them the buffers are reduced (a fairway is
+# narrower than 2 x 300 m); the depth rule stays fully active. Routes that use the reduced
+# clearance get a COLREG Rule 9 warning and a full-buffer alternative.
+NARROW_PASSAGES = [
+    {"name": "Fehmarnsund", "polygon": [(11.07, 54.36), (11.26, 54.36), (11.26, 54.42), (11.07, 54.42)]},
+    {"name": "Kiel Fjord (Friedrichsort narrows)",
+     "polygon": [(10.13, 54.33), (10.23, 54.33), (10.23, 54.425), (10.13, 54.425)]},
+]
+PASSAGE_LAND_BUFFER_M = 50
+PASSAGE_ZONE_BUFFER_M = 100
+PASSAGE_WARNING = "narrow passage (COLREG Rule 9): reduced clearance, keep to the fairway"
+log = logging.getLogger("routing")
+CATEGORY_LABEL = {"no_entry": "no-entry area", "firing": "firing area", "restricted": "restricted military area",
+                  "exercise": "exercise area"}
+DEPTH_FILE = "depth_kiel_bay.npz"
+ZONES_FILE = "restricted_zones_kiel_bay.geojson"
+SOURCES = {"land": "Natural Earth 1:10m (public domain)",
+           "depth": "EMODnet Bathymetry DTM (CC BY 4.0)",
+           "zones": "© OpenStreetMap contributors (ODbL)"}
+NOT_FOR_NAVIGATION = "Not for navigation."
 
 
 class RouteError(ValueError):
-    """The route can't be computed (outside the area, no water nearby, no connection)."""
+    """The route can't be computed (outside the area, no usable water nearby, no connection)."""
 
 
-# ---------------------------------------------------------------------------
-# Cost terms (phase 1: none). The interface for later phases.
-# ---------------------------------------------------------------------------
+class RoutingDataMissing(FileNotFoundError):
+    """data/ lacks the depth or zone file."""
+
 
 @dataclass(frozen=True)
 class RouteContext:
     speed_kn: float
-    departure: datetime | None = None    # for time-dependent terms (weather), unused in phase 1
+    departure: datetime | None = None    # for time-dependent rules later (weather)
 
 
-class CostTerm(Protocol):
-    name: str
+@dataclass(frozen=True)
+class Rules:
+    """Everything that decides which squares and steps a route may use."""
+    required_depth_m: float | None = None          # None: no depth rule
+    block: tuple[str, ...] = ()                    # zone categories that are closed
+    penalty: tuple[str, ...] = ()                  # zone categories that cost extra
+    land_buffer_km: float = 0.0                    # open water
+    zone_buffer_km: float = 0.0
+    passages: bool = False                         # reduced buffers in NARROW_PASSAGES
+    passage_land_buffer_km: float = 0.0
+    passage_zone_buffer_km: float = 0.0
+    penalty_factor: float = ZONE_PENALTY
 
-    def blocked(self, cell: tuple[int, int], grid: "Grid") -> bool:
-        """Hard limit: this square may not be used at all (too shallow, restricted)."""
 
-    def extra(self, a: tuple[int, int], b: tuple[int, int], step_km: float, ctx: RouteContext) -> float:
-        """Extra cost (>= 0, in km-equivalents) for the step a -> b."""
-
-    def segment_ok(self, p_km: tuple[float, float], q_km: tuple[float, float], grid: "Grid") -> bool:
-        """May smoothing replace grid steps by the straight segment p -> q?"""
-
-
-COST_TERMS: list[CostTerm] = []          # phase 1: distance only
+LAND_ONLY = Rules()
 
 
 # ---------------------------------------------------------------------------
-# Grid
+# Grid and data
 # ---------------------------------------------------------------------------
 
 @dataclass(frozen=True)
@@ -88,150 +143,630 @@ class Grid:
         row, col = cell
         return self.x0 + (col + 0.5) * self.cell_km, self.y0 + (row + 0.5) * self.cell_km
 
+    def centres(self) -> tuple[np.ndarray, np.ndarray]:
+        rows, cols = self.water.shape
+        return np.meshgrid(self.x0 + (np.arange(cols) + 0.5) * self.cell_km,
+                           self.y0 + (np.arange(rows) + 0.5) * self.cell_km)
 
-def to_lonlat(x_km: float, y_km: float) -> tuple[float, float]:
-    """Inverse of tools._to_km."""
+    def squares(self) -> np.ndarray:
+        rows, cols = self.water.shape
+        gx, gy = np.meshgrid(self.x0 + np.arange(cols) * self.cell_km, self.y0 + np.arange(rows) * self.cell_km)
+        return shapely.box(gx, gy, gx + self.cell_km, gy + self.cell_km)
+
+    def lonlat_bounds(self) -> list[list[float]]:
+        rows, cols = self.water.shape
+        lon0, lat0 = to_lonlat(self.x0, self.y0)
+        lon1, lat1 = to_lonlat(self.x0 + cols * self.cell_km, self.y0 + rows * self.cell_km)
+        return [[float(lat0), float(lon0)], [float(lat1), float(lon1)]]
+
+
+def to_lonlat(x_km, y_km):
+    """Inverse of tools._to_km (works on numbers and numpy arrays)."""
     return x_km / tools._KM_PER_DEG_LON, y_km / tools._KM_PER_DEG_LAT
 
 
 @functools.lru_cache(maxsize=4)
 def build_grid(cell_km: float = CELL_KM) -> Grid:
-    """Water squares of ROUTE_BBOX. Built once per resolution (about 0.1 s at 1 km)."""
+    """Water squares of ROUTE_BBOX. Built once per resolution."""
     land = tools._land_km()
     shapely.prepare(land)
     lon0, lat0, lon1, lat1 = ROUTE_BBOX
     x0, y0 = tools._to_km(lon0, lat0)
     x1, y1 = tools._to_km(lon1, lat1)
     cols, rows = int((x1 - x0) // cell_km), int((y1 - y0) // cell_km)
-    xs = x0 + np.arange(cols) * cell_km
-    ys = y0 + np.arange(rows) * cell_km
-    gx, gy = np.meshgrid(xs, ys)                       # (rows, cols)
-    squares = shapely.box(gx, gy, gx + cell_km, gy + cell_km)
-    water = ~shapely.intersects(land, squares)         # touches land at all -> not water
+    empty = Grid(x0, y0, cell_km, np.zeros((rows, cols), dtype=bool))
+    water = ~shapely.intersects(land, empty.squares())          # touches land at all -> not water
     return Grid(x0, y0, cell_km, water)
 
 
 @functools.lru_cache(maxsize=1)
-def _land_with_margin():
-    return prep(tools._land_km().buffer(SAFETY_MARGIN_KM))
+def _land_exact():
+    return prep(tools._land_km())
+
+
+@dataclass(frozen=True)
+class Raster:
+    """A value per pixel of the depth grid (row 0 = north), looked up at local-km points."""
+    values: np.ndarray
+    lon0: float
+    lat1: float
+    ppd: int
+
+    def at(self, x_km, y_km) -> np.ndarray:
+        lon, lat = to_lonlat(np.asarray(x_km, dtype=float), np.asarray(y_km, dtype=float))
+        rows, cols = self.values.shape
+        col = np.clip(((lon - self.lon0) * self.ppd).astype(int), 0, cols - 1)
+        row = np.clip(((self.lat1 - lat) * self.ppd).astype(int), 0, rows - 1)
+        return self.values[row, col]
+
+
+@functools.lru_cache(maxsize=1)
+def load_depth() -> Raster:
+    """Water depth in m (positive), <= 0 on land. EMODnet Bathymetry, ~100 m pixels."""
+    path = tools._safe_path(tools.DATA_DIR, DEPTH_FILE)
+    if not path.exists():
+        raise RoutingDataMissing("Depth data missing: run `python download_routing_data.py` once.")
+    data = np.load(path)
+    return Raster(values=-(data["elev_dm"].astype(np.float32) / 10), lon0=float(data["lon0"]),
+                  lat1=float(data["lat1"]), ppd=int(data["pixels_per_degree"]))
+
+
+def _pixel_xy() -> tuple[np.ndarray, np.ndarray]:
+    d = load_depth()
+    rows, cols = d.values.shape
+    lon = d.lon0 + (np.arange(cols) + 0.5) / d.ppd
+    lat = d.lat1 - (np.arange(rows) + 0.5) / d.ppd
+    return np.meshgrid(lon * tools._KM_PER_DEG_LON, lat * tools._KM_PER_DEG_LAT)
+
+
+def _mark_outline(inside: np.ndarray, geom) -> np.ndarray:
+    """Also mark every pixel the outline of `geom` passes through, so features thinner than
+    a pixel (a narrow zone, a mole) are not lost when only pixel centres are tested."""
+    d = load_depth()
+    boundary = shapely.segmentize(geom.boundary, 0.02)            # a point every 20 m
+    xy = shapely.get_coordinates(boundary)
+    if not len(xy):
+        return inside
+    lon, lat = to_lonlat(xy[:, 0], xy[:, 1])
+    rows, cols = inside.shape
+    col = np.clip(((lon - d.lon0) * d.ppd).astype(int), 0, cols - 1)
+    row = np.clip(((d.lat1 - lat) * d.ppd).astype(int), 0, rows - 1)
+    inside = inside.copy()
+    inside[row, col] = True
+    return inside
+
+
+def _distance_raster(inside: np.ndarray) -> Raster:
+    """km from each pixel to the nearest pixel where `inside` is true (0 inside)."""
+    d = load_depth()
+    dy = tools._KM_PER_DEG_LAT / d.ppd
+    dx = tools._KM_PER_DEG_LON / d.ppd
+    dist = distance_transform_edt(~inside, sampling=(dy, dx)).astype(np.float32)
+    return Raster(dist, d.lon0, d.lat1, d.ppd)
+
+
+@functools.lru_cache(maxsize=1)
+def land_distance() -> Raster:
+    """km to the nearest land: the land polygons OR land in the depth model (small islets)."""
+    land = tools._land_km()
+    shapely.prepare(land)
+    inside = shapely.contains_xy(land, *_pixel_xy()) | (load_depth().values <= 0)
+    return _distance_raster(_mark_outline(inside, land))
+
+
+# --- restricted zones ----------------------------------------------------------
+
+@dataclass(frozen=True)
+class Zone:
+    name: str
+    category: str
+    osm: str
+    geom_km: object           # shapely geometry in the local km grid
+
+
+@functools.lru_cache(maxsize=1)
+def load_zones() -> tuple[Zone, ...]:
+    path = tools._safe_path(tools.DATA_DIR, ZONES_FILE)
+    if not path.exists():
+        raise RoutingDataMissing("Restricted-zone data missing: run `python download_routing_data.py` once.")
+    zones = []
+    for f in json.loads(path.read_text(encoding="utf-8"))["features"]:
+        geom = shapely.transform(shape(f["geometry"]),
+                                 lambda xy: xy * [tools._KM_PER_DEG_LON, tools._KM_PER_DEG_LAT])
+        p = f["properties"]
+        zones.append(Zone(p["name"], p["category"], p["osm"], geom))
+    tiny = [z for z in zones if is_tiny(z)]
+    if tiny:
+        log.warning("Tiny unnamed zones (< 1 ha): blocked, but without a buffer: %s",
+                    ", ".join(f"{z.osm} ({z.category}, {z.geom_km.area * 100:.2f} ha)" for z in tiny))
+    else:
+        log.warning("Tiny unnamed zones (< 1 ha): none in the zone file.")
+    return tuple(zones)
+
+
+def is_tiny(zone: "Zone") -> bool:
+    """An unnamed zone smaller than 1 ha (the download names unnamed zones '<category> area')."""
+    return zone.geom_km.area < TINY_ZONE_KM2 and zone.name == f"{zone.category} area"
+
+
+def tiny_zones() -> list[dict]:
+    return [{"osm": z.osm, "category": z.category, "area_ha": round(z.geom_km.area * 100, 2)}
+            for z in load_zones() if is_tiny(z)]
+
+
+def zones_geojson() -> dict:
+    """The zone file as it is (lon/lat), for drawing on the map."""
+    path = tools._safe_path(tools.DATA_DIR, ZONES_FILE)
+    if not path.exists():
+        raise RoutingDataMissing("Restricted-zone data missing: run `python download_routing_data.py` once.")
+    return json.loads(path.read_text(encoding="utf-8"))
+
+
+@functools.lru_cache(maxsize=16)
+def _zone_union(categories: tuple[str, ...], include_tiny: bool = True):
+    geoms = [z.geom_km for z in load_zones() if z.category in categories and (include_tiny or not is_tiny(z))]
+    if not geoms:
+        return None
+    union = unary_union(geoms)
+    shapely.prepare(union)
+    return union
+
+
+@functools.lru_cache(maxsize=16)
+def zone_distance(categories: tuple[str, ...], include_tiny: bool = True) -> Raster:
+    """km to the nearest zone of these categories (0 inside). include_tiny=False: for buffers."""
+    union = _zone_union(categories, include_tiny)
+    if union is None:
+        inside = np.zeros(load_depth().values.shape, dtype=bool)
+    else:
+        inside = _mark_outline(shapely.contains_xy(union, *_pixel_xy()), union)
+    return _distance_raster(inside)
+
+
+@functools.lru_cache(maxsize=16)
+def _zone_squares(cell_km: float, categories: tuple[str, ...]) -> np.ndarray:
+    """Grid squares that touch a zone of these categories (exact)."""
+    union = _zone_union(categories)
+    grid = build_grid(cell_km)
+    if union is None:
+        return np.zeros(grid.water.shape, dtype=bool)
+    return shapely.intersects(union, grid.squares())
+
+
+# --- values at square centres and minimum values along steps (cached per grid) ----
+
+@functools.lru_cache(maxsize=1)
+def _passage_union():
+    from shapely.geometry import Polygon
+    polys = [shapely.transform(Polygon(p["polygon"]), lambda xy: xy * [tools._KM_PER_DEG_LON, tools._KM_PER_DEG_LAT])
+             for p in NARROW_PASSAGES]
+    union = unary_union(polys)
+    shapely.prepare(union)
+    return union
+
+
+@functools.lru_cache(maxsize=1)
+def passage_raster() -> Raster:
+    """1 inside a named narrow passage, 0 elsewhere (pixel grid)."""
+    d = load_depth()
+    inside = shapely.contains_xy(_passage_union(), *_pixel_xy()).astype(np.float32)
+    return Raster(inside, d.lon0, d.lat1, d.ppd)
+
+
+@functools.lru_cache(maxsize=8)
+def _passage_exact_zone(cell_km: float, categories: tuple[str, ...]):
+    """Inside narrow passages, the EXACT distance (shapely) from square centres and from each
+    step to the closed zones without tiny ones; np.inf elsewhere. No raster tolerance is
+    needed there, so the small passage buffers are not doubled."""
+    grid = build_grid(cell_km)
+    union = _zone_union(categories, False)
+    in_passage = centre_values(cell_km, "passage") > 0
+    rows, cols = in_passage.shape
+    centre = np.full((rows, cols), np.inf)
+    steps = {}
+    if union is None:
+        return centre, {d: np.full((rows, cols), np.inf) for d in BASE_STEPS}
+    cx, cy = grid.centres()
+    centre[in_passage] = shapely.distance(union, shapely.points(cx[in_passage], cy[in_passage]))
+    for dr, dc in BASE_STEPS:
+        d = np.full((rows, cols), np.inf)
+        either = in_passage | _shifted(in_passage, dr, dc)
+        r, c = np.nonzero(either)
+        x0, y0 = cx[r, c], cy[r, c]
+        lines = shapely.linestrings(np.stack([np.column_stack([x0, y0]),
+                                              np.column_stack([x0 + dc * cell_km, y0 + dr * cell_km])], axis=1))
+        d[r, c] = shapely.distance(union, lines)
+        steps[(dr, dc)] = d
+    return centre, steps
+
+
+def _raster(key):
+    if key == "depth":
+        return load_depth()
+    if key == "land":
+        return land_distance()
+    if key == "passage":
+        return passage_raster()
+    return zone_distance(key[1], key[2] if len(key) > 2 else True)   # ("zone", categories[, tiny])
+
+
+@functools.lru_cache(maxsize=32)
+def centre_values(cell_km: float, key) -> np.ndarray:
+    return _raster(key).at(*build_grid(cell_km).centres())
+
+
+@functools.lru_cache(maxsize=32)
+def step_minimum(cell_km: float, key) -> dict[tuple[int, int], np.ndarray]:
+    """For every step between two square centres (4 base directions), the minimum of the
+    raster along it, sampled every SAMPLE_KM. Independent of the settings, so it is computed
+    once per grid; a rule check is then one comparison per step."""
+    grid = build_grid(cell_km)
+    raster = _raster(key)
+    cx, cy = grid.centres()
+    rows, cols = grid.water.shape
+    result = {}
+    for dr, dc in BASE_STEPS:
+        n = math.ceil(cell_km * math.hypot(dr, dc) / SAMPLE_KM) + 1
+        values = np.full((rows, cols), np.inf, dtype=np.float32)
+        for t in np.linspace(0, 1, n):
+            np.minimum(values, raster.at(cx + t * dc * cell_km, cy + t * dr * cell_km), out=values)
+        result[(dr, dc)] = values
+    return result
+
+
+def _sample(points):
+    xs, ys = [], []
+    for p, q in zip(points, points[1:]):
+        n = max(2, math.ceil(math.dist(p, q) / SAMPLE_KM) + 1)
+        xs.append(np.linspace(p[0], q[0], n))
+        ys.append(np.linspace(p[1], q[1], n))
+    if not xs:
+        return np.array([points[0][0]]), np.array([points[0][1]])
+    return np.concatenate(xs), np.concatenate(ys)
+
+
+def _min_along(raster: Raster, points) -> tuple[float, tuple[float, float]]:
+    x, y = _sample(points)
+    v = raster.at(x, y)
+    i = int(np.argmin(v))
+    return float(v[i]), (float(x[i]), float(y[i]))
+
+
+def depths_along(points) -> tuple[float, tuple[float, float]]:
+    """Minimum depth along a polyline (sampled every SAMPLE_KM) and where it is."""
+    return _min_along(load_depth(), points)
 
 
 # ---------------------------------------------------------------------------
-# Routing
+# Settings -> rules
 # ---------------------------------------------------------------------------
 
-def connected_sea(mask: np.ndarray) -> np.ndarray:
-    """Only the largest connected water area (the open sea). Pockets cut off by the coarse
-    grid (a narrow fjord end, a lake) are dropped, so a click there snaps to water that a
-    route can actually leave. Diagonal steps need both side squares, so "connected"
-    means connected through the 4 sides."""
+def zone_rules(zones: str = "block") -> dict[str, str]:
+    """The rule per category. `zones` ("block" / "penalty") applies to firing and other
+    restricted military areas; no-entry areas are always blocked, exercise areas ignored."""
+    if zones not in ("block", "penalty"):
+        raise RouteError("zones must be 'block' or 'penalty'.")
+    return {**ZONE_RULES, "firing": zones, "restricted": zones}
+
+
+def make_rules(draft_m: float = DRAFT_M, margin_m: float = SAFETY_MARGIN_M, zones: str = "block",
+               land_buffer_m: float = LAND_BUFFER_M, zone_buffer_m: float = ZONE_BUFFER_M,
+               passages: bool = True, passage_land_buffer_m: float = PASSAGE_LAND_BUFFER_M,
+               passage_zone_buffer_m: float = PASSAGE_ZONE_BUFFER_M,
+               penalty_factor: float = ZONE_PENALTY) -> Rules:
+    if draft_m <= 0 or margin_m < 0:
+        raise RouteError("Draft must be more than 0 m and the margin at least 0 m.")
+    if min(land_buffer_m, zone_buffer_m, passage_land_buffer_m, passage_zone_buffer_m) < 0:
+        raise RouteError("Buffers can't be negative.")
+    if not (isinstance(penalty_factor, (int, float)) and math.isfinite(penalty_factor)
+            and PENALTY_RANGE[0] <= penalty_factor <= PENALTY_RANGE[1]):
+        raise RouteError(f"The penalty factor must be between {PENALTY_RANGE[0]:g} and {PENALTY_RANGE[1]:g}.")
+    rules = zone_rules(zones)
+    return Rules(required_depth_m=round(draft_m + margin_m, 2),
+                 block=tuple(sorted(c for c, r in rules.items() if r == "block")),
+                 penalty=tuple(sorted(c for c, r in rules.items() if r == "penalty")),
+                 land_buffer_km=land_buffer_m / 1000, zone_buffer_km=zone_buffer_m / 1000,
+                 passages=passages,
+                 # a passage never gets a LARGER buffer than open water
+                 passage_land_buffer_km=min(passage_land_buffer_m, land_buffer_m) / 1000,
+                 passage_zone_buffer_km=min(passage_zone_buffer_m, zone_buffer_m) / 1000,
+                 penalty_factor=float(penalty_factor))
+
+
+def _threshold(buffer_km: float) -> float:
+    """Distance a centre / step must keep: the buffer plus the raster tolerance, or with
+    no buffer just 'not inside' (more than 0)."""
+    return buffer_km + RASTER_TOL_KM if buffer_km > 0 else 1e-6
+
+
+def _thresholds(rules: Rules, in_passage) -> tuple:
+    """(land, zone) thresholds per point: reduced inside narrow passages (if enabled)."""
+    land_open, zone_open = _threshold(rules.land_buffer_km), _threshold(rules.zone_buffer_km)
+    if not rules.passages:
+        return land_open, zone_open
+    return (np.where(in_passage, _threshold(rules.passage_land_buffer_km), land_open),
+            np.where(in_passage, _threshold(rules.passage_zone_buffer_km), zone_open))
+
+
+# ---------------------------------------------------------------------------
+# Usable squares, allowed steps, graph
+# ---------------------------------------------------------------------------
+
+@dataclass
+class Plan:
+    grid: Grid
+    rules: Rules
+    usable: np.ndarray                     # usable squares in the largest connected area
+    graph: object                          # scipy csr matrix (directed, cost per step)
+
+
+def _shifted(mask: np.ndarray, dr: int, dc: int) -> np.ndarray:
+    """out[r, c] = mask[r + dr, c + dc] (False outside the grid)."""
     rows, cols = mask.shape
-    label = np.zeros(mask.shape, dtype=np.int32)
-    sizes = [0]
-    for start in zip(*np.nonzero(mask)):
-        if label[start]:
-            continue
-        current = len(sizes)
-        label[start] = current
-        stack, size = [start], 0
-        while stack:
-            r, c = stack.pop()
-            size += 1
-            for nr, nc in ((r - 1, c), (r + 1, c), (r, c - 1), (r, c + 1)):
-                if 0 <= nr < rows and 0 <= nc < cols and mask[nr, nc] and not label[nr, nc]:
-                    label[nr, nc] = current
-                    stack.append((nr, nc))
-        sizes.append(size)
-    if len(sizes) == 1:
-        return mask
-    return label == int(np.argmax(sizes))
+    out = np.zeros_like(mask)
+    rs, re_ = max(0, -dr), min(rows, rows - dr)
+    cs, ce = max(0, -dc), min(cols, cols - dc)
+    out[rs:re_, cs:ce] = mask[rs + dr:re_ + dr, cs + dc:ce + dc]
+    return out
 
 
-def usable_mask(grid: Grid, terms: list[CostTerm]) -> np.ndarray:
-    """Water squares of the open sea that no term blocks."""
-    mask = grid.water.copy()
-    if terms:
-        for row, col in zip(*np.nonzero(mask)):
-            if any(t.blocked((row, col), grid) for t in terms):
-                mask[row, col] = False
-    return connected_sea(mask)
+def _usable_squares(grid: Grid, rules: Rules, terms: list) -> np.ndarray:
+    ck = grid.cell_km
+    usable = grid.water.copy()
+    land_thr, zone_thr = _thresholds(rules, centre_values(ck, "passage") > 0)
+    if rules.required_depth_m is not None:
+        usable &= centre_values(ck, "depth") >= rules.required_depth_m
+    if rules.land_buffer_km > 0:
+        usable &= centre_values(ck, "land") >= land_thr
+    if rules.block:
+        usable &= ~_zone_squares(ck, rules.block)                    # inside any closed zone (also tiny)
+        if rules.zone_buffer_km > 0:                                 # buffer: not around tiny zones
+            raster_ok = centre_values(ck, ("zone", rules.block, False)) >= zone_thr
+            if rules.passages:                                       # passages: exact distance instead
+                in_p = centre_values(ck, "passage") > 0
+                exact, _ = _passage_exact_zone(ck, rules.block)
+                raster_ok = np.where(in_p, exact >= rules.passage_zone_buffer_km, raster_ok)
+            usable &= raster_ok
+    for term in terms:                                    # custom terms (slow, square by square)
+        if hasattr(term, "blocked_mask"):
+            usable &= ~term.blocked_mask(grid)
+        else:
+            for row, col in zip(*np.nonzero(usable)):
+                if term.blocked((row, col), grid):
+                    usable[row, col] = False
+    return usable
 
 
-def snap(grid: Grid, mask: np.ndarray, lat: float, lon: float) -> tuple[tuple[int, int], float]:
-    """Nearest usable water square to (lat, lon) -> (cell, distance in km)."""
+@functools.lru_cache(maxsize=8)
+def _plan_cached(cell_km: float, rules: Rules) -> Plan:
+    return _plan(build_grid(cell_km), rules, [])
+
+
+def build_plan(cell_km: float, rules: Rules, terms: list) -> Plan:
+    """Usable squares + step graph for these rules (cached when there are no custom terms)."""
+    if not terms:
+        return _plan_cached(cell_km, rules)
+    return _plan(build_grid(cell_km), rules, terms)
+
+
+def _penalty_squares(ck: float, rules: Rules) -> np.ndarray | None:
+    """Squares that cost the penalty: inside a penalty zone, or within its buffer. The buffer
+    follows the zone's mode: around a blocked zone it blocks, around a penalty zone it costs
+    the same penalty, so a crossable zone never keeps a hard 500 m ring."""
+    if not rules.penalty or rules.penalty_factor == 0:
+        return None
+    squares = _zone_squares(ck, rules.penalty)
+    if rules.zone_buffer_km > 0:
+        land_thr, zone_thr = _thresholds(rules, centre_values(ck, "passage") > 0)
+        squares = squares | (centre_values(ck, ("zone", rules.penalty, False)) < zone_thr)
+    return squares
+
+
+def _plan(grid: Grid, rules: Rules, terms: list) -> Plan:
+    ck = grid.cell_km
+    usable = _usable_squares(grid, rules, terms)
+    rows, cols = usable.shape
+    penalty_squares = _penalty_squares(ck, rules)
+    land_steps = step_minimum(ck, "land")
+    depth_steps = step_minimum(ck, "depth") if rules.required_depth_m is not None else None
+    inside_steps = step_minimum(ck, ("zone", rules.block, True)) if rules.block else None
+    buffer_steps = (step_minimum(ck, ("zone", rules.block, False))
+                    if rules.block and rules.zone_buffer_km > 0 else None)
+    # A step touching a narrow passage uses the passage's (smaller) buffers.
+    in_passage = centre_values(ck, "passage") > 0
+    exact_steps = (_passage_exact_zone(ck, rules.block)[1]
+                   if rules.block and rules.zone_buffer_km > 0 and rules.passages else None)
+    land = tools._land_km()
+    shapely.prepare(land)
+
+    index = np.arange(rows * cols).reshape(rows, cols)
+    sources, targets, weights = [], [], []
+    for dr, dc in BASE_STEPS:
+        land_thr, zone_thr = _thresholds(rules, in_passage | _shifted(in_passage, dr, dc))
+        ok = usable & _shifted(usable, dr, dc) & (land_steps[(dr, dc)] >= land_thr)
+        if depth_steps is not None:
+            ok &= depth_steps[(dr, dc)] >= rules.required_depth_m
+        if inside_steps is not None:
+            ok &= inside_steps[(dr, dc)] > 1e-6
+        if buffer_steps is not None:
+            raster_ok = buffer_steps[(dr, dc)] >= zone_thr
+            if rules.passages:                                       # passages: exact distance instead
+                touching = in_passage | _shifted(in_passage, dr, dc)
+                raster_ok = np.where(touching, exact_steps[(dr, dc)] >= rules.passage_zone_buffer_km, raster_ok)
+            ok &= raster_ok
+        r, c = np.nonzero(ok)
+        if dr and dc and len(r):
+            # A diagonal step must also stay off the exact land polygons (no corner cutting).
+            x0 = grid.x0 + (c + 0.5) * ck
+            y0 = grid.y0 + (r + 0.5) * ck
+            coords = np.stack([np.column_stack([x0, y0]), np.column_stack([x0 + dc * ck, y0 + dr * ck])], axis=1)
+            clear = ~shapely.intersects(land, shapely.linestrings(coords))
+            r, c = r[clear], c[clear]
+        if terms and len(r):
+            seg_terms = [t for t in terms if hasattr(t, "segment_ok")]
+            keep = np.array([all(t.segment_ok(grid.center((a, b)), grid.center((a + dr, b + dc)), grid)
+                                 for t in seg_terms) for a, b in zip(r, c)], dtype=bool)
+            r, c = r[keep], c[keep]
+        step_km = ck * math.hypot(dr, dc)
+        a, b = index[r, c], index[r + dr, c + dc]
+        w_ab = np.full(len(a), step_km)
+        w_ba = np.full(len(a), step_km)
+        if penalty_squares is not None:
+            w_ab += rules.penalty_factor * step_km * penalty_squares[r + dr, c + dc]
+            w_ba += rules.penalty_factor * step_km * penalty_squares[r, c]
+        ctx = RouteContext(DEFAULT_SPEED_KN)
+        for t in terms:                                   # custom extra costs (slow)
+            if hasattr(t, "extra"):
+                w_ab += np.array([t.extra((i, j), (i + dr, j + dc), step_km, ctx) for i, j in zip(r, c)])
+                w_ba += np.array([t.extra((i + dr, j + dc), (i, j), step_km, ctx) for i, j in zip(r, c)])
+        sources += [a, b]
+        targets += [b, a]
+        weights += [w_ab, w_ba]
+    n = rows * cols
+    graph = csr_matrix((np.concatenate(weights), (np.concatenate(sources), np.concatenate(targets))),
+                       shape=(n, n))
+    # Only the largest connected area (the open sea): pockets cut off by the rules are dropped.
+    _, labels = connected_components(graph, directed=False)
+    labels = labels.reshape(rows, cols)
+    if usable.any():
+        sea = labels == np.bincount(labels[usable]).argmax()
+        usable = usable & sea
+    return Plan(grid, rules, usable, graph)
+
+
+def usable_mask(grid: Grid, terms: list) -> np.ndarray:
+    """Usable squares (land only + custom terms) in the largest connected area."""
+    return build_plan(grid.cell_km, LAND_ONLY, terms).usable
+
+
+# ---------------------------------------------------------------------------
+# Snapping, and why a click is rejected
+# ---------------------------------------------------------------------------
+
+def _in_box(lat: float, lon: float):
     lon0, lat0, lon1, lat1 = ROUTE_BBOX
     if not (lon0 <= lon <= lon1 and lat0 <= lat <= lat1):
         raise RouteError(f"Outside the routing area ({lat0}–{lat1}° N, {lon0}–{lon1}° E).")
+
+
+def point_reason(lat: float, lon: float, rules: Rules) -> str:
+    """Why this exact point can't be used with these rules (in plain words, with values)."""
+    x, y = tools._to_km(lon, lat)
+    p = Point(x, y)
+    if _land_exact().contains(p):
+        return "this point is on land"
+    if rules.required_depth_m is not None:
+        d = float(load_depth().at(x, y))
+        if d < rules.required_depth_m:
+            return (f"the water here is {max(d, 0):.1f} m deep, the boat needs at least "
+                    f"{rules.required_depth_m:g} m (draft + safety margin)")
+    for z in load_zones():
+        if z.category in rules.block and z.geom_km.contains(p):
+            return f"this point is inside {z.name} ({CATEGORY_LABEL[z.category]}, closed with the current settings)"
+    if rules.block and rules.zone_buffer_km > 0:
+        dist, z = min(((z.geom_km.distance(p), z) for z in load_zones() if z.category in rules.block),
+                      key=lambda t: t[0])
+        if dist < rules.zone_buffer_km + RASTER_TOL_KM:
+            return (f"this point is {dist * 1000:.0f} m from {z.name} ({CATEGORY_LABEL[z.category]}); "
+                    f"the zone buffer is {rules.zone_buffer_km * 1000:.0f} m")
+    if rules.land_buffer_km > 0:
+        dist = float(land_distance().at(x, y))
+        if dist < rules.land_buffer_km + RASTER_TOL_KM:
+            return f"this point is about {dist * 1000:.0f} m from land; the land buffer is {rules.land_buffer_km * 1000:.0f} m"
+    return "the water here is cut off from the open sea with the current settings"
+
+
+def snap(grid: Grid, mask: np.ndarray, lat: float, lon: float,
+         rules: Rules = LAND_ONLY) -> tuple[tuple[int, int], float]:
+    """Nearest usable square to (lat, lon) -> (cell, distance in km)."""
+    _in_box(lat, lon)
     x, y = tools._to_km(lon, lat)
     rows, cols = np.nonzero(mask)
+    if not len(rows):
+        raise RouteError("No usable water at all with these settings.")
     cx = grid.x0 + (cols + 0.5) * grid.cell_km
     cy = grid.y0 + (rows + 0.5) * grid.cell_km
     dist = np.hypot(cx - x, cy - y)
     best = int(np.argmin(dist))
     if dist[best] > MAX_SNAP_KM:
-        raise RouteError(f"No water within {MAX_SNAP_KM:g} km of this point.")
+        raise RouteError(f"No usable water within {MAX_SNAP_KM:g} km: {point_reason(lat, lon, rules)}.")
     return (int(rows[best]), int(cols[best])), float(dist[best])
 
 
-def astar(grid: Grid, mask: np.ndarray, start: tuple[int, int], goal: tuple[int, int],
-          terms: list[CostTerm], ctx: RouteContext) -> tuple[list[tuple[int, int]], int]:
-    """Cheapest path of squares from start to goal -> (cells, squares expanded)."""
-    rows, cols = mask.shape
-    gx, gy = grid.center(goal)
+# ---------------------------------------------------------------------------
+# Search and smoothing
+# ---------------------------------------------------------------------------
 
-    def h(cell):                                     # straight line: never more than the true cost
-        x, y = grid.center(cell)
-        return math.hypot(x - gx, y - gy)
-
-    best = {start: 0.0}
-    came_from = {}
-    queue = [(h(start), 0.0, start)]
-    expanded = 0
-    while queue:
-        _, g, cell = heapq.heappop(queue)
-        if cell == goal:
-            path = [cell]
-            while path[-1] in came_from:
-                path.append(came_from[path[-1]])
-            return path[::-1], expanded
-        if g > best.get(cell, math.inf):
-            continue                                 # an outdated queue entry
-        expanded += 1
-        r, c = cell
-        for dr, dc in STEPS:
-            nr, nc = r + dr, c + dc
-            if not (0 <= nr < rows and 0 <= nc < cols) or not mask[nr, nc]:
-                continue
-            if dr and dc and not (mask[r + dr, c] and mask[r, c + dc]):
-                continue                             # no corner cutting past land
-            step_km = grid.cell_km * (math.sqrt(2) if dr and dc else 1.0)
-            cost = g + step_km + sum(t.extra(cell, (nr, nc), step_km, ctx) for t in terms)
-            if cost < best.get((nr, nc), math.inf):
-                best[(nr, nc)] = cost
-                came_from[(nr, nc)] = cell
-                heapq.heappush(queue, (cost + h((nr, nc)), cost, (nr, nc)))
-    raise RouteError("No water route between these points.")
+def shortest_cells(plan: Plan, start: tuple[int, int], goal: tuple[int, int]) -> tuple[list, int]:
+    """Cheapest chain of squares (Dijkstra on the step graph) -> (cells, squares reached)."""
+    cols = plan.usable.shape[1]
+    s, g = start[0] * cols + start[1], goal[0] * cols + goal[1]
+    dist, pred = dijkstra(plan.graph, directed=True, indices=s, return_predecessors=True)
+    if not np.isfinite(dist[g]):
+        raise RouteError("No water route between these points with these settings.")
+    path, node = [g], g
+    while node != s:
+        node = int(pred[node])
+        path.append(node)
+    return [divmod(n, cols) for n in reversed(path)], int(np.isfinite(dist).sum())
 
 
-def smooth(points: list[tuple[float, float]], grid: Grid, terms: list[CostTerm]) -> list[tuple[float, float]]:
-    """String pulling: from each kept point jump to the farthest later point whose straight
-    segment keeps SAFETY_MARGIN_KM from land (and that every term allows)."""
+def segment_ok(p, q, rules: Rules, grid: Grid, terms: list) -> bool:
+    """May a straight line p -> q replace grid steps? The same rules as the steps, sampled
+    every SAMPLE_KM, plus the exact land polygons."""
+    line = LineString([p, q])
+    if _land_exact().intersects(line):
+        return False
+    x, y = _sample([p, q])
+    land_thr, zone_thr = _thresholds(rules, passage_raster().at(x, y) > 0)
+    if (land_distance().at(x, y) < land_thr).any():
+        return False
+    if rules.required_depth_m is not None and (load_depth().at(x, y) < rules.required_depth_m).any():
+        return False
+    if rules.block:
+        if _zone_union(rules.block).intersects(line):
+            return False
+        if rules.zone_buffer_km > 0:
+            in_p = passage_raster().at(x, y) > 0 if rules.passages else np.zeros(len(x), dtype=bool)
+            if (zone_distance(rules.block, False).at(x, y)[~in_p] < (zone_thr[~in_p] if np.ndim(zone_thr)
+                                                                     else zone_thr)).any():
+                return False
+            if in_p.any():                                           # passage part: exact distance
+                union = _zone_union(rules.block, False)
+                inside_part = line.intersection(_passage_union())
+                if union is not None and not inside_part.is_empty \
+                        and union.distance(inside_part) < rules.passage_zone_buffer_km:
+                    return False
+    if rules.penalty and rules.penalty_factor > 0 and _zone_union(rules.penalty) is not None:
+        # Straightening must not hide a penalty: no cutting through a penalty zone or its buffer.
+        # (Factor 0: they cost nothing, so straight lines may cross them.)
+        if _zone_union(rules.penalty).intersects(line):
+            return False
+        if rules.zone_buffer_km > 0:
+            in_p = passage_raster().at(x, y) > 0
+            _, zone_thr = _thresholds(rules, in_p)
+            if (zone_distance(rules.penalty, False).at(x, y) < zone_thr).any():
+                return False
+    return all(t.segment_ok(p, q, grid) for t in terms if hasattr(t, "segment_ok"))
+
+
+def smooth(points, rules: Rules, grid: Grid, terms: list):
+    """String pulling: from each kept point, extend the straight segment forward as long as
+    it passes segment_ok()."""
     if len(points) <= 2:
         return points
-    land = _land_with_margin()
-
-    def ok(p, q):
-        return (not land.intersects(LineString([p, q]))
-                and all(t.segment_ok(p, q, grid) for t in terms))
-
     kept, i = [points[0]], 0
     while i < len(points) - 1:
-        j = len(points) - 1
-        while j > i + 1 and not ok(points[i], points[j]):
-            j -= 1
-        kept.append(points[j])                       # j = i + 1: a grid step, water by construction
+        j = i + 1                                    # a grid step: allowed by construction
+        while j + 1 < len(points) and segment_ok(points[i], points[j + 1], rules, grid, terms):
+            j += 1
+        kept.append(points[j])
         i = j
     return kept
+
+
+def _length(points) -> float:
+    return sum(math.dist(p, q) for p, q in zip(points, points[1:]))
 
 
 def eta_text(hours: float) -> str:
@@ -242,36 +777,115 @@ def eta_text(hours: float) -> str:
 
 def _lat_lon(p_km) -> list[float]:
     lon, lat = to_lonlat(*p_km)
-    return [round(lat, 5), round(lon, 5)]
+    return [round(float(lat), 5), round(float(lon), 5)]
 
+
+def zones_on(points) -> dict[str, list[str]]:
+    """Names of the zones the line touches, per category."""
+    if len(points) < 2:
+        return {}
+    line = LineString(points)
+    found = {}
+    for z in load_zones():
+        if z.geom_km.intersects(line):
+            found.setdefault(z.category, [])
+            if z.name not in found[z.category]:
+                found[z.category].append(z.name)
+    return found
+
+
+def _zone_distance_exact(points, categories, include_tiny: bool = False) -> tuple[float | None, str | None]:
+    """Exact distance from the route to the nearest zone of these categories (and its name).
+    Tiny unnamed zones have no buffer, so by default they don't count here."""
+    if not categories:
+        return None, None
+    geom = LineString(points) if len(points) > 1 else Point(points[0])
+    return min(((z.geom_km.distance(geom), z.name) for z in load_zones()
+                if z.category in categories and (include_tiny or not is_tiny(z))), default=(None, None))
+
+
+def passages_used(points, rules: Rules) -> list[str]:
+    """Narrow passages where the route actually uses the reduced clearance (closer to land or
+    a closed zone than the open-water buffer allows)."""
+    if not rules.passages or len(points) < 2:
+        return []
+    x, y = _sample(points)
+    inside = passage_raster().at(x, y) > 0
+    if not inside.any():
+        return []
+    tight = land_distance().at(x, y) < _threshold(rules.land_buffer_km)
+    if rules.block and rules.zone_buffer_km > 0:
+        tight |= zone_distance(rules.block, False).at(x, y) < _threshold(rules.zone_buffer_km)
+    tight &= inside
+    if not tight.any():
+        return []
+    from shapely.geometry import Polygon
+    used = []
+    for p in NARROW_PASSAGES:
+        poly = shapely.transform(Polygon(p["polygon"]), lambda xy: xy * [tools._KM_PER_DEG_LON, tools._KM_PER_DEG_LAT])
+        if shapely.contains_xy(poly, x[tight], y[tight]).any():
+            used.append(p["name"])
+    return used
+
+
+def length_inside(points, categories) -> float:
+    """km of the route inside zones of these categories."""
+    union = _zone_union(categories) if categories else None
+    if union is None or len(points) < 2:
+        return 0.0
+    return float(LineString(points).intersection(union).length)
+
+
+# ---------------------------------------------------------------------------
+# The route
+# ---------------------------------------------------------------------------
 
 def route(from_lat: float, from_lon: float, to_lat: float, to_lon: float,
           speed_kn: float = DEFAULT_SPEED_KN, cell_km: float = CELL_KM,
-          terms: list[CostTerm] | None = None, departure: datetime | None = None) -> dict:
-    """The shortest water route between two points. Raises RouteError with a clear message."""
+          terms: list | None = None, departure: datetime | None = None,
+          draft_m: float = DRAFT_M, margin_m: float = SAFETY_MARGIN_M, zones: str = "block",
+          land_buffer_m: float = LAND_BUFFER_M, zone_buffer_m: float = ZONE_BUFFER_M,
+          rules: Rules | None = None, passages: bool = True,
+          passage_land_buffer_m: float = PASSAGE_LAND_BUFFER_M,
+          passage_zone_buffer_m: float = PASSAGE_ZONE_BUFFER_M, penalty_factor: float = ZONE_PENALTY,
+          alternative: bool = True) -> dict:
+    """The cheapest water route between two points. Raises RouteError with a clear message.
+    terms=None: the phase 2 rules from the settings (depth, zones, buffers, narrow passages),
+    or `rules`. terms=[...]: land only plus exactly these custom terms (terms=[] is phase 1).
+    If the route uses a narrow passage, `alternative` adds the full-buffer route for comparison."""
     if not speed_kn > 0:
         raise RouteError("Speed must be more than 0 knots.")
-    terms = COST_TERMS if terms is None else terms
-    grid = build_grid(cell_km)
-    mask = usable_mask(grid, terms)
-    start, start_snap = snap(grid, mask, from_lat, from_lon)
-    goal, goal_snap = snap(grid, mask, to_lat, to_lon)
-    ctx = RouteContext(speed_kn=speed_kn, departure=departure)
+    with_rules = terms is None
+    if rules is None:
+        rules = (make_rules(draft_m, margin_m, zones, land_buffer_m, zone_buffer_m, passages,
+                            passage_land_buffer_m, passage_zone_buffer_m, penalty_factor)
+                 if with_rules else LAND_ONLY)
+    terms = terms or []
+    plan = build_plan(cell_km, rules, terms)
+    grid = plan.grid
+    start, start_snap = snap(grid, plan.usable, from_lat, from_lon, rules)
+    goal, goal_snap = snap(grid, plan.usable, to_lat, to_lon, rules)
 
     if start == goal:
-        cells, expanded = [start], 0
+        candidates, reached = [[start]], 1
     else:
-        cells, expanded = astar(grid, mask, start, goal, terms, ctx)
-    # Smoothing is greedy, so it depends on the direction: straighten both ways and keep
-    # the shorter line (also makes A->B and B->A give the same distance).
-    centers = [grid.center(c) for c in cells]
-    forward = smooth(centers, grid, terms)
-    backward = smooth(centers[::-1], grid, terms)[::-1]
-    points = min(forward, backward, key=lambda pts: sum(math.dist(p, q) for p, q in zip(pts, pts[1:])))
-    distance_km = sum(math.dist(p, q) for p, q in zip(points, points[1:]))
+        # Equal-cost paths are broken differently from each end, and smoothing is greedy:
+        # search from both ends and straighten both ways, then keep the shortest line.
+        # So A -> B and B -> A always pick from the same candidates (same distance).
+        there, reached = shortest_cells(plan, start, goal)
+        back, _ = shortest_cells(plan, goal, start)
+        candidates = [there, back[::-1]]
+    lines = []
+    for cells in candidates:
+        centres = [grid.center(c) for c in cells]
+        lines.append(smooth(centres, rules, grid, terms))
+        lines.append(smooth(centres[::-1], rules, grid, terms)[::-1])
+    points = min(lines, key=lambda pts: (round(_length(pts), 6), len(pts)))
+    distance_km = _length(points)
     distance_nm = distance_km / KM_PER_NM
     eta_hours = distance_nm / speed_kn
-    return {
+
+    result = {
         "path": [_lat_lon(p) for p in points],
         "distance_km": round(distance_km, 2),
         "distance_nm": round(distance_nm, 2),
@@ -282,8 +896,270 @@ def route(from_lat: float, from_lon: float, to_lat: float, to_lon: float,
                   "snap_km": round(start_snap, 2)},
         "end": {"clicked": [to_lat, to_lon], "snapped": _lat_lon(grid.center(goal)),
                 "snap_km": round(goal_snap, 2)},
-        "cells_expanded": expanded,
+        "cells_expanded": reached,
         "cell_km": cell_km,
-        "cost_terms": [t.name for t in terms],
-        "note": "Phase 1: shortest water route on a 1:10m coastline. No depth, traffic or weather yet.",
+        "snap_warnings": [f"The {label} was moved {snapped:.1f} km to the nearest usable water: "
+                          f"{point_reason(lat, lon, rules)}."
+                          for label, snapped, lat, lon in (("start", start_snap, from_lat, from_lon),
+                                                           ("destination", goal_snap, to_lat, to_lon))
+                          if snapped > SNAP_WARN_KM],
+        "cost_terms": ([n for n, on in [("depth", rules.required_depth_m is not None),
+                                        ("zones (block)", bool(rules.block)),
+                                        ("zones (penalty)", bool(rules.penalty)),
+                                        ("buffers", rules.land_buffer_km > 0 or rules.zone_buffer_km > 0)] if on]
+                       + [t.name for t in terms]),
     }
+    if with_rules:
+        min_depth, where = depths_along(points)
+        land_km, _ = _min_along(land_distance(), points)
+        zone_km, zone_name = _zone_distance_exact(points, rules.block)
+        on = zones_on(points)
+        rule_of = zone_rules(zones)
+        used = passages_used(points, rules)
+        alt = None
+        if used and alternative:
+            try:
+                full = replace(rules, passages=False)
+                a = route(from_lat, from_lon, to_lat, to_lon, speed_kn, cell_km, rules=full,
+                          draft_m=draft_m, margin_m=margin_m, zones=zones, alternative=False)
+                if a["snap_warnings"]:
+                    # Moving the start / destination elsewhere is not a fair comparison.
+                    raise RouteError("not possible from these points (" + " ".join(a["snap_warnings"]) + ")")
+                alt = {"distance_km": a["distance_km"], "distance_nm": a["distance_nm"], "eta_text": a["eta_text"],
+                       "eta_hours": a["eta_hours"], "path": a["path"],
+                       "extra_km": round(a["distance_km"] - distance_km, 2),
+                       "label": "with full buffers everywhere (no narrow-passage exception)"}
+            except RouteError as exc:
+                alt = {"error": str(exc), "label": "with full buffers everywhere (no narrow-passage exception)"}
+        result.update({
+            "min_depth_m": round(min_depth, 1),
+            "min_depth_at": _lat_lon(where),
+            "required_depth_m": rules.required_depth_m,
+            "min_land_distance_km": round(land_km, 2),
+            "min_zone_distance_km": None if zone_km is None else round(zone_km, 2),
+            "nearest_zone": zone_name,
+            "zones_crossed": sorted({n for c, names in on.items() if rule_of.get(c) != "ignore" for n in names}),
+            "exercise_areas_crossed": on.get("exercise", []),    # passage allowed, information only
+            "passages_used": used,
+            "passage_warning": f"{', '.join(used)}: {PASSAGE_WARNING}" if used else None,
+            "alternative": alt,
+            "zone_km_inside_penalty": round(length_inside(points, rules.penalty), 2) if rules.penalty else 0.0,
+            "settings": {"draft_m": draft_m, "margin_m": margin_m, "zones": zones,
+                         "land_buffer_m": rules.land_buffer_km * 1000, "zone_buffer_m": rules.zone_buffer_km * 1000,
+                         "passages": rules.passages,
+                         "passage_land_buffer_m": rules.passage_land_buffer_km * 1000,
+                         "passage_zone_buffer_m": rules.passage_zone_buffer_km * 1000,
+                         "penalty_factor": rules.penalty_factor, "rules": rule_of},
+            "sources": SOURCES,
+            "note": ("Depth from a ~100 m bathymetry model (not a nautical chart), firing areas treated as "
+                     "always active, no traffic or weather yet. " + NOT_FOR_NAVIGATION),
+        })
+    return result
+
+
+# ---------------------------------------------------------------------------
+# Explaining the route: which rule caused how much detour
+# ---------------------------------------------------------------------------
+
+def _side(points, a_km, b_km) -> dict | None:
+    """On which side of the direct line the route bulges out, and how far at most."""
+    ax, ay = a_km
+    bx, by = b_km
+    length = math.hypot(bx - ax, by - ay)
+    if length < 1e-6 or len(points) < 2:
+        return None
+    nx, ny = -(by - ay) / length, (bx - ax) / length           # left normal of the direct line
+    offsets = [(x - ax) * nx + (y - ay) * ny for x, y in points]
+    far = max(offsets, key=abs)
+    if abs(far) < 0.3:
+        return {"side": "along the direct line", "max_offset_km": round(abs(far), 1)}
+    sx, sy = (nx, ny) if far > 0 else (-nx, -ny)                # direction of the bulge
+    side = ("north" if sy > 0 else "south") if abs(sy) >= abs(sx) else ("east" if sx > 0 else "west")
+    return {"side": side, "max_offset_km": round(abs(far), 1)}
+
+
+def _extra_text(extra: float | None) -> str | None:
+    """How a step's extra km is shown: small values are grid / straightening noise."""
+    if extra is None:
+        return None
+    if abs(extra) < NOISE_KM:
+        return "≈ 0 km (grid rounding)"
+    return f"{'+' if extra > 0 else ''}{extra} km"
+
+
+def _names(names: list[str]) -> str:
+    return names[0] if len(names) == 1 else ", ".join(names[:-1]) + " and " + names[-1]
+
+
+def side_sentence(side: dict | None) -> str:
+    """'The route runs up to 11.6 km north of the direct line.' (or '' if it doesn't bulge)."""
+    if not side or side["side"] == "along the direct line":
+        return ""
+    return f"The route runs up to {side['max_offset_km']} km {side['side']} of the direct line."
+
+
+def main_reason_sentence(main: dict | None, side: dict | None) -> str:
+    """The main reason as one plain sentence, built in code. Names every zone of the step."""
+    if main is None:
+        text = "Main reason: there is no real detour; the route is close to the shortest water route."
+    elif main.get("zones_avoided"):
+        text = (f"Main reason: the restricted zones add {main['extra_km']} km, because the route avoids "
+                f"{_names(main['zones_avoided'])}.")
+    elif main["step"].startswith("+ depth"):
+        text = f"Main reason: the depth rule adds {main['extra_km']} km" + (
+            f" ({main['reason']})." if main.get("reason") else ".")
+    elif main["step"].startswith("+ safety buffers"):
+        text = f"Main reason: the safety buffers add {main['extra_km']} km" + (
+            f" ({main['reason']})." if main.get("reason") else ".")
+    else:
+        text = f"Main reason: {main['step'].removeprefix('+ ')} adds {main['extra_km']} km."
+    extra = side_sentence(side)
+    return f"{text} {extra}" if extra else text
+
+
+def explain(from_lat: float, from_lon: float, to_lat: float, to_lon: float,
+            speed_kn: float = DEFAULT_SPEED_KN, draft_m: float = DRAFT_M, margin_m: float = SAFETY_MARGIN_M,
+            zones: str = "block", land_buffer_m: float = LAND_BUFFER_M, zone_buffer_m: float = ZONE_BUFFER_M,
+            cell_km: float = CELL_KM, passages: bool = True,
+            passage_land_buffer_m: float = PASSAGE_LAND_BUFFER_M,
+            passage_zone_buffer_m: float = PASSAGE_ZONE_BUFFER_M, penalty_factor: float = ZONE_PENALTY) -> dict:
+    """The route plus a detour breakdown, all computed in code: the same trip with the rules
+    added one by one (land only -> + depth -> + zones -> + buffers). Steps within +-NOISE_KM
+    are shown as "≈ 0 km (grid rounding)"; adding a rule can't really make a route shorter."""
+    full = make_rules(draft_m, margin_m, zones, land_buffer_m, zone_buffer_m, passages,
+                      passage_land_buffer_m, passage_zone_buffer_m, penalty_factor)
+    depth_only = Rules(required_depth_m=full.required_depth_m)
+    with_zones = replace(depth_only, block=full.block, penalty=full.penalty, penalty_factor=full.penalty_factor)
+    buffer_label = f"+ safety buffers ({land_buffer_m:g} m from land, {zone_buffer_m:g} m from closed zones"
+    buffer_label += (f"; {full.passage_land_buffer_km * 1000:g} / {full.passage_zone_buffer_km * 1000:g} m "
+                     "in narrow passages)" if passages else ")")
+    stages = [
+        ("direct water route (land only)", LAND_ONLY),
+        (f"+ depth rule (at least {full.required_depth_m:g} m)", depth_only),
+        ("+ restricted zones", with_zones),
+        (buffer_label, full),
+    ]
+    common = dict(draft_m=draft_m, margin_m=margin_m, zones=zones)
+    final = route(from_lat, from_lon, to_lat, to_lon, speed_kn, cell_km, rules=full, **common)
+    # Every step starts and ends at the FINAL route's snapped points (usable under all rules,
+    # since each step only adds rules), so the steps compare the same trip.
+    (s_lat, s_lon), (e_lat, e_lon) = final["start"]["snapped"], final["end"]["snapped"]
+    rows, previous = [], None
+    for name, rules in stages:
+        try:
+            r = final if rules == full else route(s_lat, s_lon, e_lat, e_lon, speed_kn, cell_km,
+                                                  rules=rules, alternative=False, **common)
+        except RouteError as exc:
+            rows.append({"step": name, "distance_km": None, "extra_km": None, "extra_text": None,
+                         "reason": str(exc)})
+            previous = None
+            continue
+        pts = [tools._to_km(lon, lat) for lat, lon in r["path"]]
+        extra = None if previous is None else round(r["distance_km"] - previous["distance_km"], 2)
+        row = {"step": name, "distance_km": r["distance_km"], "extra_km": extra, "extra_text": _extra_text(extra),
+               "noise": extra is not None and abs(extra) < NOISE_KM}
+        if previous is not None:
+            before, prev_pts = previous["rules"], previous["pts"]
+            if rules.required_depth_m is not None and before.required_depth_m is None:
+                d, at = depths_along(prev_pts)
+                if d < rules.required_depth_m:
+                    lat, lon = _lat_lon(at)
+                    row["reason"] = (f"the direct route crosses water only {max(d, 0):.1f} m deep at "
+                                     f"{lat:.3f}° N, {lon:.3f}° E; the boat needs {rules.required_depth_m:g} m")
+            if (rules.block or rules.penalty) and not (before.block or before.penalty):
+                avoided = sorted({n for c, names in zones_on(prev_pts).items() if c in rules.block for n in names})
+                if avoided:
+                    row["reason"] = "avoids " + ", ".join(avoided)
+                    row["zones_avoided"] = avoided
+            if (rules.land_buffer_km or rules.zone_buffer_km) and not (before.land_buffer_km or before.zone_buffer_km):
+                land_km, _ = _min_along(land_distance(), prev_pts)
+                zone_km, zone_name = _zone_distance_exact(prev_pts, rules.block)
+                parts = []
+                if land_km < rules.land_buffer_km:
+                    parts.append(f"about {land_km * 1000:.0f} m of land")
+                if zone_km is not None and zone_km < rules.zone_buffer_km:
+                    parts.append(f"{zone_km * 1000:.0f} m of {zone_name}")
+                if parts:
+                    row["reason"] = "without buffers the route came within " + " and ".join(parts)
+                if r.get("passage_warning"):
+                    row["passage_warning"] = r["passage_warning"]
+        rows.append(row)
+        previous = {"distance_km": r["distance_km"], "pts": pts, "rules": rules}
+
+    alternatives = []
+    if final.get("alternative"):
+        a = final["alternative"]
+        alternatives.append({"kind": "full buffers", "label": a["label"], **{k: a.get(k) for k in
+                             ("distance_km", "eta_text", "extra_km", "error")}})
+    if full.penalty:
+        # What crossing the penalty zones would mean: the route if they were ignored.
+        free = replace(full, penalty=())
+        try:
+            c = route(s_lat, s_lon, e_lat, e_lon, speed_kn, cell_km, rules=free, alternative=False, **common)
+            c_pts = [tools._to_km(lon, lat) for lat, lon in c["path"]]
+            inside = length_inside(c_pts, full.penalty)
+            if inside > 0.01:
+                saves = round(final["distance_km"] - c["distance_km"], 2)
+                text = (f"crossing would save {max(saves, 0)} km but its {inside:.2f} km inside "
+                        f"{', '.join(sorted({n for cat, names in zones_on(c_pts).items() if cat in full.penalty for n in names}))} "
+                        f"count as {inside * full.penalty_factor:.2f} km penalty (factor {full.penalty_factor:g})")
+                if final["zone_km_inside_penalty"] > 0.01:
+                    text = (f"this route crosses {final['zone_km_inside_penalty']} km of penalty zones, counted as "
+                            f"{final['zone_km_inside_penalty'] * full.penalty_factor:.2f} km (factor "
+                            f"{full.penalty_factor:g}); going around would add more than that")
+                alternatives.append({"kind": "penalty", "label": text, "distance_km": c["distance_km"],
+                                     "inside_km": round(inside, 2),
+                                     "penalty_km": round(inside * full.penalty_factor, 2), "saves_km": saves})
+        except RouteError:
+            pass
+
+    real = [r for r in rows[1:] if r.get("extra_km") is not None and not r.get("noise")]
+    main = max(real, key=lambda r: r["extra_km"], default=None)
+    a_km = tools._to_km(final["start"]["snapped"][1], final["start"]["snapped"][0])
+    b_km = tools._to_km(final["end"]["snapped"][1], final["end"]["snapped"][0])
+    final_pts = [tools._to_km(lon, lat) for lat, lon in final["path"]]
+    if main and main["extra_km"] >= NOISE_KM:
+        main_reason = (f"{main['step'].removeprefix('+ ')}: +{main['extra_km']} km"
+                       + (f" ({main['reason']})" if main.get("reason") else ""))
+    else:
+        main_reason = "no real detour: the route is close to the shortest water route"
+    side = _side(final_pts, a_km, b_km)
+    main_zones = list(main.get("zones_avoided", [])) if main and main["extra_km"] >= NOISE_KM else []
+    return {
+        "route": final,
+        "summary": {
+            "distance_km": final["distance_km"], "distance_nm": final["distance_nm"], "eta": final["eta_text"],
+            "speed_kn": speed_kn, "straight_line_km": round(math.dist(a_km, b_km), 2),
+            "min_depth_m": final["min_depth_m"], "required_depth_m": final["required_depth_m"],
+            "draft_m": draft_m, "margin_m": margin_m,
+            "min_land_distance_km": final["min_land_distance_km"], "land_buffer_m": land_buffer_m,
+            "min_zone_distance_km": final["min_zone_distance_km"], "nearest_zone": final["nearest_zone"],
+            "zone_buffer_m": zone_buffer_m, "zone_mode": zones, "penalty_factor": full.penalty_factor,
+            "zones_crossed": final["zones_crossed"], "exercise_areas_crossed": final["exercise_areas_crossed"],
+            "zones_avoided": sorted({n for r in rows for n in r.get("zones_avoided", [])}),
+            "passages_used": final["passages_used"], "passage_warning": final["passage_warning"],
+            "detour_side": side,
+        },
+        "detour": rows,
+        "alternatives": alternatives,
+        "main_reason": main_reason,
+        "main_reason_sentence": main_reason_sentence(main if main and main["extra_km"] >= NOISE_KM else None, side),
+        "main_zones": main_zones,
+        "note": final["note"],
+    }
+
+
+def shallow_mask(draft_m: float = DRAFT_M, margin_m: float = SAFETY_MARGIN_M, cell_km: float = CELL_KM) -> dict:
+    """Water squares shallower than draft + margin, for the map layer (rows south -> north,
+    packed bits, base64)."""
+    grid = build_grid(cell_km)
+    required = round(draft_m + margin_m, 2)
+    mask = grid.water & (centre_values(cell_km, "depth") < required)
+    return {"required_depth_m": required, "rows": int(mask.shape[0]), "cols": int(mask.shape[1]),
+            "bounds": grid.lonlat_bounds(),
+            "bits": base64.b64encode(np.packbits(mask.ravel())).decode("ascii")}
+
+
+def warm_up():
+    """Build the default grid, rasters and plan once (a few seconds), e.g. at app start."""
+    build_plan(CELL_KM, make_rules(), [])

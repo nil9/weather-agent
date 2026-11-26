@@ -8,8 +8,15 @@
   GET  /api/model_comparison -> reports/model_comparison_<data source>.json (compare_models.py)
   GET  /api/reference?lat=..&lon=..
                       -> Open-Meteo model values for the point (real data only), for comparison
-  GET  /api/route?from_lat=..&from_lon=..&to_lat=..&to_lon=..&speed_kn=6
-                      -> shortest water route (routing.py, code only, no LLM)
+  GET  /api/route?from_lat=..&from_lon=..&to_lat=..&to_lon=..&speed_kn=6&draft_m=2&margin_m=1&zones=block
+              &land_buffer_m=300&zone_buffer_m=500&passage_land_buffer_m=50&passage_zone_buffer_m=100
+              &penalty_factor=10
+                      -> shortest water route (routing.py, code only, no LLM): land, depth, zones, buffers
+  GET  /api/route_explain?(same parameters)
+                      -> the route plus the detour breakdown (which rule added how many km)
+  GET  /api/route_zones -> the restricted zones (GeoJSON, OpenStreetMap) for the Route tab
+  GET  /api/route_shallow?draft_m=2&margin_m=1
+                      -> water shallower than draft + margin (packed grid) for the map layer
 
 Data source: WEATHER_DATA_SOURCE=dummy (default) or real. The app never fetches
 observations itself (agent.py / real_data.py do); it only fetches Open-Meteo for the
@@ -104,10 +111,29 @@ class Point(BaseModel):
     lon: float = Field(ge=-180, le=180)
 
 
+class RouteRequest(BaseModel):
+    """The route planned in the Route tab (start, destination, settings), sent with chat
+    questions so the chat can explain it."""
+    from_lat: float = Field(ge=-90, le=90)
+    from_lon: float = Field(ge=-180, le=180)
+    to_lat: float = Field(ge=-90, le=90)
+    to_lon: float = Field(ge=-180, le=180)
+    speed_kn: float = Field(routing.DEFAULT_SPEED_KN, ge=1, le=40)
+    draft_m: float = Field(routing.DRAFT_M, ge=0.3, le=10)
+    margin_m: float = Field(routing.SAFETY_MARGIN_M, ge=0, le=5)
+    zones: Literal["block", "penalty"] = "block"
+    land_buffer_m: float = Field(routing.LAND_BUFFER_M, ge=0, le=3000)
+    zone_buffer_m: float = Field(routing.ZONE_BUFFER_M, ge=0, le=5000)
+    passage_land_buffer_m: float = Field(routing.PASSAGE_LAND_BUFFER_M, ge=0, le=3000)
+    passage_zone_buffer_m: float = Field(routing.PASSAGE_ZONE_BUFFER_M, ge=0, le=5000)
+    penalty_factor: float = Field(routing.ZONE_PENALTY, ge=0, le=20)
+
+
 class ChatRequest(BaseModel):
     question: str = Field(min_length=1, max_length=500)
     history: list[ChatMessage] = Field(default_factory=list, max_length=chat.MAX_HISTORY)
     point: Point | None = None          # None = the default sea point
+    route: RouteRequest | None = None   # None = no route planned yet
 
 
 @app.get("/api/forecast_at")
@@ -129,15 +155,64 @@ def forecast_at(lat: float = Query(ge=-90, le=90), lon: float = Query(ge=-180, l
 @app.get("/api/route")
 def sea_route(from_lat: float = Query(ge=-90, le=90), from_lon: float = Query(ge=-180, le=180),
               to_lat: float = Query(ge=-90, le=90), to_lon: float = Query(ge=-180, le=180),
-              speed_kn: float = Query(routing.DEFAULT_SPEED_KN, ge=1, le=40)):
-    """Shortest water route between two points. Uses only the coastline, so it works the
-    same with dummy and real data."""
+              speed_kn: float = Query(routing.DEFAULT_SPEED_KN, ge=1, le=40),
+              draft_m: float = Query(routing.DRAFT_M, ge=0.3, le=10),
+              margin_m: float = Query(routing.SAFETY_MARGIN_M, ge=0, le=5),
+              zones: Literal["block", "penalty"] = "block",
+              land_buffer_m: float = Query(routing.LAND_BUFFER_M, ge=0, le=3000),
+              zone_buffer_m: float = Query(routing.ZONE_BUFFER_M, ge=0, le=5000),
+              passage_land_buffer_m: float = Query(routing.PASSAGE_LAND_BUFFER_M, ge=0, le=3000),
+              passage_zone_buffer_m: float = Query(routing.PASSAGE_ZONE_BUFFER_M, ge=0, le=5000),
+              penalty_factor: float = Query(routing.ZONE_PENALTY, ge=0, le=20)):
+    """Shortest water route between two points, deep enough for the draft, outside (or
+    penalising) restricted zones and keeping the safety buffers. Uses coastline, depth and
+    zone data only, so it works the same with dummy and real weather data."""
+    return _routing_call(routing.route, from_lat, from_lon, to_lat, to_lon, speed_kn, draft_m=draft_m,
+                         margin_m=margin_m, zones=zones, land_buffer_m=land_buffer_m, zone_buffer_m=zone_buffer_m,
+                         passage_land_buffer_m=passage_land_buffer_m, passage_zone_buffer_m=passage_zone_buffer_m,
+                         penalty_factor=penalty_factor)
+
+
+def _routing_call(func, *args, **kwargs):
     try:
-        return routing.route(from_lat, from_lon, to_lat, to_lon, speed_kn)
-    except tools.LandDataMissing as exc:
+        return func(*args, **kwargs)
+    except (tools.LandDataMissing, routing.RoutingDataMissing) as exc:
         raise HTTPException(503, str(exc))
-    except routing.RouteError as exc:             # outside the area, no water nearby, no connection
+    except routing.RouteError as exc:             # outside the area, no usable water nearby, ...
         raise HTTPException(400, str(exc))
+
+
+@app.get("/api/route_explain")
+def sea_route_explain(from_lat: float = Query(ge=-90, le=90), from_lon: float = Query(ge=-180, le=180),
+                      to_lat: float = Query(ge=-90, le=90), to_lon: float = Query(ge=-180, le=180),
+                      speed_kn: float = Query(routing.DEFAULT_SPEED_KN, ge=1, le=40),
+                      draft_m: float = Query(routing.DRAFT_M, ge=0.3, le=10),
+                      margin_m: float = Query(routing.SAFETY_MARGIN_M, ge=0, le=5),
+                      zones: Literal["block", "penalty"] = "block",
+                      land_buffer_m: float = Query(routing.LAND_BUFFER_M, ge=0, le=3000),
+                      zone_buffer_m: float = Query(routing.ZONE_BUFFER_M, ge=0, le=5000),
+                      passage_land_buffer_m: float = Query(routing.PASSAGE_LAND_BUFFER_M, ge=0, le=3000),
+                      passage_zone_buffer_m: float = Query(routing.PASSAGE_ZONE_BUFFER_M, ge=0, le=5000),
+                      penalty_factor: float = Query(routing.ZONE_PENALTY, ge=0, le=20)):
+    """The detour breakdown: the same trip with the rules added one by one (code only)."""
+    return _routing_call(routing.explain, from_lat, from_lon, to_lat, to_lon, speed_kn, draft_m=draft_m,
+                         margin_m=margin_m, zones=zones, land_buffer_m=land_buffer_m, zone_buffer_m=zone_buffer_m,
+                         passage_land_buffer_m=passage_land_buffer_m, passage_zone_buffer_m=passage_zone_buffer_m,
+                         penalty_factor=penalty_factor)
+
+
+@app.get("/api/route_shallow")
+def sea_route_shallow(draft_m: float = Query(routing.DRAFT_M, ge=0.3, le=10),
+                      margin_m: float = Query(routing.SAFETY_MARGIN_M, ge=0, le=5)):
+    return _routing_call(routing.shallow_mask, draft_m, margin_m)
+
+
+@app.get("/api/route_zones")
+def route_zones():
+    try:
+        return routing.zones_geojson()
+    except routing.RoutingDataMissing as exc:
+        raise HTTPException(503, str(exc))
 
 
 @app.post("/api/chat")
@@ -147,7 +222,8 @@ def ask(request: ChatRequest):
     try:
         return chat.answer_question(request.question.strip(),
                                     [m.model_dump() for m in request.history],
-                                    request.point.model_dump() if request.point else None)
+                                    request.point.model_dump() if request.point else None,
+                                    request.route.model_dump() if request.route else None)
     except tools.LandDataMissing as exc:
         raise HTTPException(503, str(exc))
     except chat.NoForecast as exc:
@@ -156,6 +232,15 @@ def ask(request: ChatRequest):
         raise HTTPException(400, str(exc))
     except chat.ChatUnavailable as exc:
         raise HTTPException(503, f"The local LLM is not reachable (is Ollama running?): {exc}")
+
+
+@app.on_event("startup")
+def warm_up_routing():
+    """Build the routing grid and rasters once (about 1 s), so the first route is fast."""
+    try:
+        routing.warm_up()
+    except (tools.LandDataMissing, routing.RoutingDataMissing):
+        pass                                      # the Route tab then shows the setup message
 
 
 if __name__ == "__main__":

@@ -42,7 +42,8 @@ python compare_models.py
 python app.py
 # then open http://127.0.0.1:8000 in your browser (Ctrl+C stops the server)
 
-# 6b. Optional: offline tests for the sea routing (Route tab)
+# 6b. Sea routing data (depth + restricted zones), once; then the offline routing tests
+python download_routing_data.py
 python test_routing.py
 
 # 7. Optional: real observations instead of the dummy data (internet needed, no API key)
@@ -79,10 +80,22 @@ about 500 m of the coast count as water, because the 1:10m coastline is coarse).
 then answers for that point. It needs an internet connection for the map tiles and the Leaflet
 library. The server only listens on localhost.
 
-The **Route** tab computes the shortest water route between two clicks (start, then destination):
-each point snaps to the nearest water on a ~1 km grid, A* finds the route, and the panel shows the
-distance in km and nautical miles and the ETA for your speed (default 6 knots). Code only, no LLM;
-no depth, traffic or weather yet (phase 1), so it is not for navigation.
+The **Route** tab computes the shortest water route between two clicks (start, then destination)
+on a 0.25 km grid: it avoids land, water shallower than your draft plus a safety margin (default
+2.0 + 1.0 m, EMODnet Bathymetry), and restricted zones from OpenStreetMap (no-entry areas always;
+firing areas like Todendorf and Putlos avoided or, if you choose, allowed with a high penalty), and
+keeps safety buffers (default 300 m from land, 500 m from closed zones). Shallow water is drawn as a
+blue hatched layer. The panel shows the distance in km and nautical miles, the ETA for your speed
+(default 6 knots), the minimum depth and buffer distances along the route, and a "Why this route?"
+table: the direct water route, then the extra km added by the depth rule, the zones and the buffers.
+In the named narrow passages (Fehmarnsund, Kiel Fjord at Friedrichsort) the buffers are reduced
+(default 50 m from land, 100 m from zones; the depth rule stays), and the panel warns "narrow passage
+(COLREG Rule 9): reduced clearance, keep to the fairway" and shows the full-buffer alternative. In
+penalty mode the factor (0–20, default 10; 0 = zones cost nothing but are still listed) is set in the
+tab, and the 500 m buffer around a crossable zone is penalised, not blocked. Invalid values are
+marked in red instead of being replaced; any setting change recalculates the route. The Ask tab can explain a planned
+route ("Why does the route go north?"). Code only, no LLM. Firing areas count as always active, and
+there is no traffic or weather yet, so it is not for navigation.
 
 The **Ask** tab is a chat about this forecast, e.g. "Is it safe to sail tomorrow?" or "Why is EAST
 excluded?". The LLM only has read-only tools. Whether sailing is safe / caution / not safe is
@@ -91,14 +104,25 @@ Questions about other topics get "I can only answer about this forecast." Dummy 
 navigation advice. Run `python test_chat.py` to check the chat against a fixed set of questions
 in both data modes (`--source dummy` or `--source real` for one).
 
+## Data sources and licences
+
+- Coastline: Natural Earth 1:10m land (public domain).
+- Water depth (Route tab): **EMODnet Bathymetry** Digital Terrain Model, © EMODnet Bathymetry Consortium,
+  licensed **CC BY 4.0** (`data/depth_kiel_bay.npz`).
+- Restricted zones (Route tab): **© OpenStreetMap contributors**, licensed **ODbL**
+  (`data/restricted_zones_kiel_bay.geojson`, from OpenSeaMap tags via the Overpass API).
+- Real-mode observations: Deutscher Wetterdienst (DWD) via Bright Sky; model values: Open-Meteo.com (CC BY 4.0).
+- Map tiles: © OpenStreetMap contributors.
+
 ## Files
 
 | File | Purpose |
 |------|---------|
 | `generate_data.py` | Writes `data/stations.json` and `data/observations.csv` (30 days, hourly) |
 | `download_land.py` | One-time download of Natural Earth 1:10m land polygons, clipped to Kiel Bay → `data/land_kiel_bay.geojson` (for the land/sea check) |
-| `routing.py` | Sea routing (Route tab): shortest water route on a ~1 km grid over Kiel Bay (A*, no LLM), distance in km / nm and ETA; cost function ready for depth, zones, weather and traffic terms |
-| `test_routing.py` | Routing tests: never crosses land, same point = 0 km, around Fehmarn, ETA, a blocking test term |
+| `routing.py` | Sea routing (Route tab): shortest water route on a 0.5 km grid over Kiel Bay (A*, no LLM) that keeps enough water depth for the draft and avoids restricted zones; distance in km / nm, ETA and minimum depth |
+| `download_routing_data.py` | One-time download: EMODnet Bathymetry depth (→ `data/depth_kiel_bay.npz`) and restricted zones from OpenStreetMap (→ `data/restricted_zones_kiel_bay.geojson`) |
+| `test_routing.py` | Routing tests: never crosses land, same point = 0 km, around Fehmarn, ETA; depth (shallow areas, draft changes the route), firing areas avoided, penalty mode |
 | `real_data.py` | Real mode: finds DWD stations (Bright Sky), fetches and converts 14 days of observations into `data/real/current/`, cache + fallback, Open-Meteo comparison values |
 | `test_real_data.py` | Offline tests for the real-data path, using saved API answers in `tests/fixtures/` |
 | `tools.py` | The 6 tools (stations, observations, data quality, Holt-Winters forecast, sea-point estimate, write report) and their JSON specs |

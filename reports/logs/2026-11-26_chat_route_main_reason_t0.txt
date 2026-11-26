@@ -1,0 +1,65 @@
+Tiny unnamed zones (< 1 ha): none in the zone file.
+route answer missed zones ['Schießgebiet Putlos', 'Schießgebiet Todendorf']; main-reason sentence added
+route answer missed zones ['Schießgebiet Putlos', 'Schießgebiet Todendorf']; main-reason sentence added
+route answer missed zones ['Schießgebiet Putlos', 'Schießgebiet Todendorf']; main-reason sentence added
+=== DUMMY MODE · today = 2026-11-25 · forecast ['2026-11-25', '2026-11-26', '2026-11-27'] ===
+
+Part 1: code only (dummy mode)
+  all passed
+
+Part 2: chat answers (LLM, dummy mode)
+  PASS  ( 2.8 s, tools 1/1)  [route] 'Why does the route go north?'  [with route] -> route explained: todendorf, putlos, firing
+  PASS  ( 2.0 s, tools 1/1)  [route] 'Why does the route go north?'  [with route] -> route explained: todendorf, putlos, firing
+  PASS  ( 2.7 s, tools 1/1)  [route] 'Why this detour?'  [with route] -> route explained: todendorf, putlos, firing
+  PASS  ( 2.7 s, tools 1/1)  [route] 'Why this detour?'  [with route] -> route explained: todendorf, putlos, firing
+  PASS  ( 3.7 s, tools 1/1)  [route] 'How deep is it along the way?'  [with route] -> route explained: 6.6
+  PASS  ( 3.4 s, tools 1/1)  [route] 'How deep is it along the way?'  [with route] -> route explained: 6.6
+  PASS  ( 1.9 s, tools 1/1)  [route] 'Which zones does it avoid?'  [with route] -> route explained: Todendorf, Putlos
+  PASS  ( 2.0 s, tools 1/1)  [route] 'Which zones does it avoid?'  [with route] -> route explained: Todendorf, Putlos
+  PASS  ( 0.0 s, no tools)  [route] 'Why this detour?' -> asked to plan a route first
+  PASS  ( 0.0 s, no tools)  [route] 'Why this detour?' -> asked to plan a route first
+  PASS  ( 3.5 s, tools 2/2)  [route] 'Why does the route go north, and is it safe to sail tomorrow?'  [with route] -> route explained: todendorf, putlos, firing; 2026-11-26: caution
+  PASS  ( 4.9 s, tools 2/2)  [route] 'Why does the route go north, and is it safe to sail tomorrow?'  [with route] -> route explained: todendorf, putlos, firing; 2026-11-26: caution
+  PASS  ( 4.4 s, tools 1/1)  [route] 'why this route'  [with route] -> names Graswarder/Heiligenhafen, Schießgebiet Putlos, Schießgebiet Todendorf, +3.46 km
+  PASS  ( 4.4 s, tools 1/1)  [route] 'why this route'  [with route] -> names Graswarder/Heiligenhafen, Schießgebiet Putlos, Schießgebiet Todendorf, +3.46 km
+  PASS  ( 3.8 s, tools 1/1)  [route] 'why this route'  [with route] -> names Nördlicher Gefahrenbereich, Schießgebiet Putlos, Schießgebiet Todendorf, +0.41 km
+  PASS  ( 3.8 s, tools 1/1)  [route] 'why this route'  [with route] -> names Nördlicher Gefahrenbereich, Schießgebiet Putlos, Schießgebiet Todendorf, +0.41 km
+
+| Group (dummy) | Pass | Fail |
+|---|---|---|
+| route | 16 | 0 |
+| code checks | all | 0 |
+Tiny unnamed zones (< 1 ha): none in the zone file.
+route answer missed zones ['Schießgebiet Putlos', 'Schießgebiet Todendorf']; main-reason sentence added
+route answer missed zones ['Schießgebiet Putlos', 'Schießgebiet Todendorf']; main-reason sentence added
+route answer missed zones ['Schießgebiet Putlos', 'Schießgebiet Todendorf']; main-reason sentence added
+=== REAL MODE · today = 2026-11-26 · forecast ['2026-11-26', '2026-11-27', '2026-11-28'] ===
+
+Part 1: code only (real mode)
+  all passed
+
+Part 2: chat answers (LLM, real mode)
+  PASS  ( 2.2 s, tools 1/1)  [route] 'Why does the route go north?'  [with route] -> route explained: todendorf, putlos, firing
+  PASS  ( 2.0 s, tools 1/1)  [route] 'Why does the route go north?'  [with route] -> route explained: todendorf, putlos, firing
+  PASS  ( 2.9 s, tools 1/1)  [route] 'Why this detour?'  [with route] -> route explained: todendorf, putlos, firing
+  PASS  ( 4.2 s, tools 1/1)  [route] 'Why this detour?'  [with route] -> route explained: todendorf, putlos, firing
+  PASS  ( 3.0 s, tools 1/1)  [route] 'How deep is it along the way?'  [with route] -> route explained: 6.6
+  PASS  ( 3.1 s, tools 1/1)  [route] 'How deep is it along the way?'  [with route] -> route explained: 6.6
+  PASS  ( 2.2 s, tools 1/1)  [route] 'Which zones does it avoid?'  [with route] -> route explained: Todendorf, Putlos
+  PASS  ( 1.9 s, tools 1/1)  [route] 'Which zones does it avoid?'  [with route] -> route explained: Todendorf, Putlos
+  PASS  ( 0.0 s, no tools)  [route] 'Why this detour?' -> asked to plan a route first
+  PASS  ( 0.0 s, no tools)  [route] 'Why this detour?' -> asked to plan a route first
+  PASS  ( 4.0 s, tools 2/2)  [route] 'Why does the route go north, and is it safe to sail tomorrow?'  [with route] -> route explained: todendorf, putlos, firing; 2026-11-27: caution (wind from Open-Meteo)
+  PASS  ( 3.7 s, tools 2/2)  [route] 'Why does the route go north, and is it safe to sail tomorrow?'  [with route] -> route explained: todendorf, putlos, firing; 2026-11-27: caution (wind from Open-Meteo)
+  PASS  ( 4.2 s, tools 1/1)  [route] 'why this route'  [with route] -> names Graswarder/Heiligenhafen, Schießgebiet Putlos, Schießgebiet Todendorf, +3.46 km
+  PASS  ( 4.0 s, tools 1/1)  [route] 'why this route'  [with route] -> names Graswarder/Heiligenhafen, Schießgebiet Putlos, Schießgebiet Todendorf, +3.46 km
+  PASS  ( 4.1 s, tools 1/1)  [route] 'why this route'  [with route] -> names Nördlicher Gefahrenbereich, Schießgebiet Putlos, Schießgebiet Todendorf, +0.41 km
+  PASS  ( 5.8 s, tools 1/1)  [route] 'why this route'  [with route] -> names Nördlicher Gefahrenbereich, Schießgebiet Putlos, Schießgebiet Todendorf, +0.41 km
+
+| Group (real) | Pass | Fail |
+|---|---|---|
+| route | 16 | 0 |
+| code checks | all | 0 |
+
+
+All modes passed.

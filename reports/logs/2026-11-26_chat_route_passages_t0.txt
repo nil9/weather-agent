@@ -1,0 +1,51 @@
+Tiny unnamed zones (< 1 ha): none in the zone file.
+=== DUMMY MODE · today = 2026-11-25 · forecast ['2026-11-25', '2026-11-26', '2026-11-27'] ===
+
+Part 1: code only (dummy mode)
+  all passed
+
+Part 2: chat answers (LLM, dummy mode)
+  PASS  ( 9.2 s, tools 1/1)  [route] 'Why does the route go north?'  [with route] -> route explained: todendorf, putlos, firing
+  PASS  ( 2.1 s, tools 1/1)  [route] 'Why does the route go north?'  [with route] -> route explained: todendorf, putlos, firing
+  PASS  ( 2.4 s, tools 1/1)  [route] 'Why this detour?'  [with route] -> route explained: todendorf, putlos, firing
+  PASS  ( 2.4 s, tools 1/1)  [route] 'Why this detour?'  [with route] -> route explained: todendorf, putlos, firing
+  PASS  ( 3.7 s, tools 1/1)  [route] 'How deep is it along the way?'  [with route] -> route explained: 6.6
+  PASS  ( 5.0 s, tools 1/1)  [route] 'How deep is it along the way?'  [with route] -> route explained: 6.6
+  PASS  ( 1.8 s, tools 1/1)  [route] 'Which zones does it avoid?'  [with route] -> route explained: Todendorf, Putlos
+  PASS  ( 1.8 s, tools 1/1)  [route] 'Which zones does it avoid?'  [with route] -> route explained: Todendorf, Putlos
+  PASS  ( 0.0 s, no tools)  [route] 'Why this detour?' -> asked to plan a route first
+  PASS  ( 0.0 s, no tools)  [route] 'Why this detour?' -> asked to plan a route first
+  PASS  ( 3.9 s, tools 2/2)  [route] 'Why does the route go north, and is it safe to sail tomorrow?'  [with route] -> route explained: todendorf, putlos, firing; 2026-11-26: caution
+  PASS  ( 3.7 s, tools 2/2)  [route] 'Why does the route go north, and is it safe to sail tomorrow?'  [with route] -> route explained: todendorf, putlos, firing; 2026-11-26: caution
+
+| Group (dummy) | Pass | Fail |
+|---|---|---|
+| route | 12 | 0 |
+| code checks | all | 0 |
+Tiny unnamed zones (< 1 ha): none in the zone file.
+=== REAL MODE · today = 2026-11-26 · forecast ['2026-11-26', '2026-11-27', '2026-11-28'] ===
+
+Part 1: code only (real mode)
+  all passed
+
+Part 2: chat answers (LLM, real mode)
+  PASS  ( 2.6 s, tools 1/1)  [route] 'Why does the route go north?'  [with route] -> route explained: todendorf, putlos, firing
+  PASS  ( 2.0 s, tools 1/1)  [route] 'Why does the route go north?'  [with route] -> route explained: todendorf, putlos, firing
+  PASS  ( 2.9 s, tools 1/1)  [route] 'Why this detour?'  [with route] -> route explained: todendorf, putlos, firing
+  PASS  ( 2.8 s, tools 1/1)  [route] 'Why this detour?'  [with route] -> route explained: todendorf, putlos, firing
+  PASS  ( 4.5 s, tools 1/1)  [route] 'How deep is it along the way?'  [with route] -> route explained: 6.6
+  PASS  ( 3.2 s, tools 1/1)  [route] 'How deep is it along the way?'  [with route] -> route explained: 6.6
+  PASS  ( 1.5 s, tools 1/1)  [route] 'Which zones does it avoid?'  [with route] -> route explained: Todendorf, Putlos
+  PASS  ( 1.3 s, tools 1/1)  [route] 'Which zones does it avoid?'  [with route] -> route explained: Todendorf, Putlos
+  PASS  ( 0.0 s, no tools)  [route] 'Why this detour?' -> asked to plan a route first
+  PASS  ( 0.0 s, no tools)  [route] 'Why this detour?' -> asked to plan a route first
+  PASS  ( 3.7 s, tools 2/2)  [route] 'Why does the route go north, and is it safe to sail tomorrow?'  [with route] -> route explained: todendorf, putlos, firing; 2026-11-27: caution (wind from Open-Meteo)
+  PASS  ( 3.5 s, tools 2/2)  [route] 'Why does the route go north, and is it safe to sail tomorrow?'  [with route] -> route explained: todendorf, putlos, firing; 2026-11-27: caution (wind from Open-Meteo)
+
+| Group (real) | Pass | Fail |
+|---|---|---|
+| route | 12 | 0 |
+| code checks | all | 0 |
+
+
+All modes passed.

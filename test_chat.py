@@ -1,6 +1,6 @@
 """Regression tests for the chat, in BOTH data modes (needs Ollama for part 2).
 
-Usage:  python test_chat.py [--runs N] [--source dummy|real|both]    (default: both)
+Usage:  python test_chat.py [--runs N] [--source dummy|real|both] [--group route]   (default: both, all groups)
 
 "both" runs the whole file once per data source, each in its own process
 (WEATHER_DATA_SOURCE=dummy / real), because the data source is chosen at import.
@@ -15,6 +15,7 @@ Part 2 (LLM): ask every question and check the answer. Expected values come from
   must be free of tool/field names and ISO dates.
 """
 import argparse
+import functools
 import json
 import os
 import re
@@ -25,6 +26,7 @@ from datetime import date, timedelta
 from pathlib import Path
 
 import chat
+import routing
 import tools
 
 SOURCE = tools.DATA_SOURCE
@@ -99,6 +101,9 @@ def answered(r):
     internal = chat.internal_name_problems(r["answer"])
     if internal:
         return False, "; ".join(internal)
+    claims = chat.claim_problems(r["answer"])               # global: no "safe route", "ensures", ...
+    if claims:
+        return False, "; ".join(claims)
     return True, "answered"
 
 
@@ -295,8 +300,114 @@ def real_cases():
     return cases, point
 
 
+# A planned route (Route tab): Kiel Bay -> west of Fehmarn, around the Todendorf and Putlos
+# firing areas. Expected values come from the routing code, not from the LLM.
+ROUTE = {"from_lat": 54.45, "from_lon": 10.45, "to_lat": 54.45, "to_lon": 10.95}
+
+
+@functools.lru_cache(maxsize=1)
+def route_facts() -> dict:
+    return routing.explain(**ROUTE)
+
+
+def route_ok(*must_contain, any_of=(), plain_question=True):
+    """The route tool ran, every must_contain word (and one of any_of) is in the answer,
+    and the answer ends with the "Not for navigation." note."""
+    def check(r):
+        ok, reason = plain(r) if plain_question else answered(r)
+        if not ok:
+            return ok, reason
+        if chat.ROUTE_TOOL not in {t["name"] for t in r["tools_used"]}:
+            return False, f"{chat.ROUTE_TOOL} was not called"
+        text = r["answer"].lower()
+        missing = [w for w in must_contain if w.lower() not in text]
+        if missing:
+            return False, f"missing {missing}"
+        if any_of and not any(w.lower() in text for w in any_of):
+            return False, f"names none of {list(any_of)}"
+        if "not for navigation" not in text:
+            return False, "no 'Not for navigation'"
+        return True, "route explained: " + ", ".join([*must_contain, *any_of][:3])
+    return check
+
+
+def built_in_code(check):
+    """'Why' route questions are answered entirely in code (no LLM), with depth and ETA."""
+    def wrapped(r):
+        if not r.get("built_in_code"):
+            return False, "not built in code"
+        if "Minimum depth along the route" not in r["answer"] or "ETA" not in r["answer"]:
+            return False, "min depth / ETA missing"
+        ok, reason = check(r)
+        return ok, reason + " (built in code)" if ok else reason
+    return wrapped
+
+
+def no_route(r):
+    ok = r["answer"] == chat.NO_ROUTE_ANSWER and not r["tools_used"]
+    return ok, "asked to plan a route first" if ok else f"got: {r['answer'][:80]}"
+
+
+def route_and_safety(day):
+    """Mixed: the route part (route tool, zone named) and the weather part (verdict for day)."""
+    route_check = route_ok(any_of=("todendorf", "putlos", "firing"), plain_question=False)
+    safety_check = safety_ok(day)
+
+    def check(r):
+        ok, reason = route_check(r)
+        if not ok:
+            return ok, reason
+        ok, reason2 = safety_check(r)
+        if not ok:
+            return ok, reason2
+        # The weather part (after the code-built route part) must stay about the weather.
+        weather = r["answer"].split("ETA", 1)[-1]
+        stray = [w for w in ("station", "route goes", "because the route") if w in weather.lower()]
+        if stray or "get_station_status" in {t["name"] for t in r["tools_used"]}:
+            return False, f"the weather part strays into the route / stations ({stray})"
+        return ok, f"{reason}; {reason2}"
+    return check
+
+
+# Regression: "Why this route?" from Heiligenhafen named only Graswarder. The answer must name
+# every zone of the largest detour step and its extra km (both computed in code).
+HH_ROUTES = {"Heiligenhafen -> Damp": {"from_lat": 54.375, "from_lon": 11.03, "to_lat": 54.58, "to_lon": 10.03},
+             "Heiligenhafen -> Gelting": {"from_lat": 54.40, "from_lon": 11.02, "to_lat": 54.765, "to_lon": 10.0}}
+
+
+def main_reason_ok(route):
+    def check(r):
+        facts = routing.explain(**route)
+        main = max((row for row in facts["detour"][1:] if row["extra_km"] is not None), key=lambda row: row["extra_km"])
+        ok, reason = route_ok("Putlos", "Todendorf", str(main["extra_km"]))(r)
+        if not ok:
+            return ok, reason
+        missing = [z for z in facts["main_zones"] if z.lower() not in r["answer"].lower()]
+        if missing:
+            return False, f"zones of the largest step missing: {missing}"
+        return True, f"names {', '.join(facts['main_zones'])}, +{main['extra_km']} km"
+    return check
+
+
+def route_cases():
+    facts = route_facts()
+    depth = str(facts["summary"]["min_depth_m"])
+    zones = ("Todendorf", "Putlos")
+    return [
+        ("route", "Why does the route go north?", [],
+         built_in_code(route_ok(any_of=("todendorf", "putlos", "firing"))), None, ROUTE),
+        ("route", "Why this detour?", [], built_in_code(route_ok(any_of=("todendorf", "putlos", "firing"))), None, ROUTE),
+        ("route", "How deep is it along the way?", [], route_ok(depth), None, ROUTE),
+        ("route", "Which zones does it avoid?", [], route_ok(*zones), None, ROUTE),
+        ("route", "Why this detour?", [], no_route, None, None),
+        ("route", "Why does the route go north, and is it safe to sail tomorrow?", [],
+         route_and_safety(TOMORROW), None, ROUTE),
+    ] + [("route", "why this route", [], built_in_code(main_reason_ok(r)), None, r) for r in HH_ROUTES.values()]
+
+
 def build_cases():
     cases, point = dummy_cases() if SOURCE == "dummy" else real_cases()
+    cases += route_cases()
     # Regressions B1-B3, the same in both modes.
     cases += [
         ("regression", "should i singh while sail tomorrow?", [], mixed_ok(TOMORROW, ["singing"])),
@@ -346,6 +457,47 @@ def test_code(cases) -> int:
         if question.startswith(("and ", "Ignore")):
             continue                        # follow-up / manipulation: not about keywords
         check(f"keyword gate: {question!r}", chat.mentions_forecast_topic(question) == (group != "off-topic"))
+
+    # Route questions: keyword gate, required tool, no-route reply (code only)
+    for q in ["Why does the route go north?", "Why this detour?", "How deep is it along the way?",
+              "Which zones does it avoid?", "Does the path cross a firing area?", "Is my draft ok?"]:
+        check(f"route word passes the gate: {q!r}", chat.mentions_forecast_topic(q) and bool(chat.ROUTE_WORDS.search(q)))
+    check("route question needs the route tool",
+          chat.missing_tools("Why does the route go north?", [], [], "Why does the route go north?", None, [], True)
+          == [chat.ROUTE_TOOL])
+    check("'go north' in a route question is not station NORTH",
+          "get_station_status" not in chat.missing_tools("Why does the route go north?", [], [], "", None, [], True))
+    check("no route planned: fixed answer, no LLM", chat.answer_question("Why this detour?")["answer"] == chat.NO_ROUTE_ANSWER)
+    check("route answers end with 'Not for navigation.'",
+          chat.not_for_navigation("It avoids Todendorf.", [{"name": chat.ROUTE_TOOL}]).endswith("Not for navigation."))
+    check("forecast answers don't get it", chat.not_for_navigation("Caution.", [{"name": "sail_safety"}]) == "Caution.")
+    hh = chat.route_tool(HH_ROUTES["Heiligenhafen -> Damp"])()
+    fixed = chat.ensure_main_reason("The route avoids Graswarder/Heiligenhafen, +4.12 km.", [hh])
+    check(f"a route answer missing zones gets the main-reason sentence ({fixed[-140:]})",
+          "Schießgebiet Putlos" in fixed and "Schießgebiet Todendorf" in fixed and "runs up to" in fixed)
+    # "Why" route questions: built in code
+    why = chat.why_route_answer(json.loads(hh))
+    check("why-answer (code): main reason, breakdown, depth, ETA, 'Not for navigation.'",
+          why.startswith("Main reason:") and "Breakdown" in why and "Minimum depth along the route" in why
+          and "ETA" in why and why.endswith("Not for navigation."))
+    check("why-route detection", chat.is_why_route_question("Why does the route go north?")
+          and not chat.is_why_route_question("How deep is it along the way?"))
+    check("mixed question: only the weather clause goes to the LLM",
+          chat.weather_part("Why does the route go north, and is it safe to sail tomorrow?") == "Is it safe to sail tomorrow?")
+    check("mixed why + weather is detected", chat.has_weather_part("Why does the route go north, and is it safe "
+                                                                   "to sail tomorrow?")
+          and not chat.has_weather_part("Why does the route go north?"))
+    # Global claim check (all answers): claims rejected, verdict labels allowed
+    for text, bad in [("This is a safe route.", True), ("The detour ensures your safety.", True),
+                      ("That guarantees calm water.", True), ("You will be safe out there.", True),
+                      ("Tomorrow is safe: Beaufort 4.", False), ("It is safe to sail tomorrow.", False),
+                      ("Friday is not safe.", False), ("Caution on Thursday.", False)]:
+        check(f"claim check: {text!r} -> {'rejected' if bad else 'allowed'}", bool(chat.claim_problems(text)) == bad)
+    check("after the retry the claim sentence is dropped",
+          chat.without_claims("Caution tomorrow. This ensures a calm trip. Wind 9 m/s.") == "Caution tomorrow. Wind 9 m/s.")
+    runs = json.loads(hh)["route"]["route_runs"]
+    check(f"wording: route_runs = '{runs}'", runs.startswith("up to ") and runs.endswith("north of the direct line")
+          and "at most" not in runs)
 
     # B3: dates and internal names
     check("ISO date rewritten", chat.humanize_dates("Friday, 2026-11-27 is caution.") == "Fri 27 Nov is caution.",
@@ -437,23 +589,27 @@ def test_code(cases) -> int:
 
 # ---------------------------------------------------------------------------
 
-def run_mode(runs: int) -> int:
+def run_mode(runs: int, group: str | None = None) -> int:
     print(f"=== {SOURCE.upper()} MODE · today = {TODAY} · forecast {DATES} ===\n")
     if len(DATES) != 3:
         print(f"Expected a 3-day {SOURCE} forecast. Run `WEATHER_DATA_SOURCE={SOURCE} python agent.py` first.")
         return 1
     cases = build_cases()
     code_failures = test_code(cases)
+    if group:
+        cases = [c for c in cases if c[0] == group]
 
     print(f"Part 2: chat answers (LLM, {SOURCE} mode)")
     results = {}
-    for group, question, history, check, *point in cases:
+    for group, question, history, check, *extra in cases:
+        point = extra[0] if extra else None
+        route = extra[1] if len(extra) > 1 else None
         for _ in range(runs):
             start = time.time()
-            r = chat.answer_question(question, history, point[0] if point else None)
+            r = chat.answer_question(question, history, point, route)
             ok, reason = check(r)
             results.setdefault(group, []).append(ok)
-            context = "  [after previous question]" if history else ""
+            context = ("  [after previous question]" if history else "") + ("  [with route]" if route else "")
             st = r.get("tool_stats") or {}
             calls = (f"tools {st['executed']}/{st['requested']}"
                      + (f", {st['cached']} cached" if st.get("cached") else "")
@@ -475,13 +631,15 @@ def main():
     parser = argparse.ArgumentParser()
     parser.add_argument("--runs", type=int, default=1)
     parser.add_argument("--source", choices=["dummy", "real", "both"], default="both")
+    parser.add_argument("--group", help="only this group of LLM cases, e.g. route (code checks always run)")
     args = parser.parse_args()
     if args.source == SOURCE:
-        sys.exit(1 if run_mode(args.runs) else 0)
+        sys.exit(1 if run_mode(args.runs, args.group) else 0)
     # Another mode (or both): run this file again with WEATHER_DATA_SOURCE set.
     failed = []
     for source in (["dummy", "real"] if args.source == "both" else [args.source]):
-        code = subprocess.run([sys.executable, __file__, "--source", source, "--runs", str(args.runs)],
+        extra = ["--group", args.group] if args.group else []
+        code = subprocess.run([sys.executable, __file__, "--source", source, "--runs", str(args.runs), *extra],
                               env={**os.environ, "WEATHER_DATA_SOURCE": source}).returncode
         if code:
             failed.append(source)
