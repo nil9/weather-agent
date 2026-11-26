@@ -8,6 +8,8 @@
   GET  /api/model_comparison -> reports/model_comparison_<data source>.json (compare_models.py)
   GET  /api/reference?lat=..&lon=..
                       -> Open-Meteo model values for the point (real data only), for comparison
+  GET  /api/route?from_lat=..&from_lon=..&to_lat=..&to_lon=..&speed_kn=6
+                      -> shortest water route (routing.py, code only, no LLM)
 
 Data source: WEATHER_DATA_SOURCE=dummy (default) or real. The app never fetches
 observations itself (agent.py / real_data.py do); it only fetches Open-Meteo for the
@@ -27,6 +29,7 @@ from fastapi.responses import FileResponse
 from pydantic import BaseModel, Field
 
 import chat
+import routing
 import tools
 
 BASE_DIR = Path(__file__).resolve().parent
@@ -120,6 +123,20 @@ def forecast_at(lat: float = Query(ge=-90, le=90), lon: float = Query(ge=-180, l
     except FileNotFoundError as exc:
         raise HTTPException(404, str(exc))
     except tools.PointRejected as exc:            # outside the area, or on land
+        raise HTTPException(400, str(exc))
+
+
+@app.get("/api/route")
+def sea_route(from_lat: float = Query(ge=-90, le=90), from_lon: float = Query(ge=-180, le=180),
+              to_lat: float = Query(ge=-90, le=90), to_lon: float = Query(ge=-180, le=180),
+              speed_kn: float = Query(routing.DEFAULT_SPEED_KN, ge=1, le=40)):
+    """Shortest water route between two points. Uses only the coastline, so it works the
+    same with dummy and real data."""
+    try:
+        return routing.route(from_lat, from_lon, to_lat, to_lon, speed_kn)
+    except tools.LandDataMissing as exc:
+        raise HTTPException(503, str(exc))
+    except routing.RouteError as exc:             # outside the area, no water nearby, no connection
         raise HTTPException(400, str(exc))
 
 

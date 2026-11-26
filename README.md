@@ -42,6 +42,9 @@ python compare_models.py
 python app.py
 # then open http://127.0.0.1:8000 in your browser (Ctrl+C stops the server)
 
+# 6b. Optional: offline tests for the sea routing (Route tab)
+python test_routing.py
+
 # 7. Optional: real observations instead of the dummy data (internet needed, no API key)
 WEATHER_DATA_SOURCE=real python agent.py     # fetches DWD data first (cached 60 min)
 WEATHER_DATA_SOURCE=real python app.py       # map with "our estimate" next to Open-Meteo
@@ -76,6 +79,11 @@ about 500 m of the coast count as water, because the 1:10m coastline is coarse).
 then answers for that point. It needs an internet connection for the map tiles and the Leaflet
 library. The server only listens on localhost.
 
+The **Route** tab computes the shortest water route between two clicks (start, then destination):
+each point snaps to the nearest water on a ~1 km grid, A* finds the route, and the panel shows the
+distance in km and nautical miles and the ETA for your speed (default 6 knots). Code only, no LLM;
+no depth, traffic or weather yet (phase 1), so it is not for navigation.
+
 The **Ask** tab is a chat about this forecast, e.g. "Is it safe to sail tomorrow?" or "Why is EAST
 excluded?". The LLM only has read-only tools. Whether sailing is safe / caution / not safe is
 decided in code (`sail_safety`: wind in Beaufort plus pressure trend), and the LLM explains it.
@@ -89,6 +97,8 @@ in both data modes (`--source dummy` or `--source real` for one).
 |------|---------|
 | `generate_data.py` | Writes `data/stations.json` and `data/observations.csv` (30 days, hourly) |
 | `download_land.py` | One-time download of Natural Earth 1:10m land polygons, clipped to Kiel Bay → `data/land_kiel_bay.geojson` (for the land/sea check) |
+| `routing.py` | Sea routing (Route tab): shortest water route on a ~1 km grid over Kiel Bay (A*, no LLM), distance in km / nm and ETA; cost function ready for depth, zones, weather and traffic terms |
+| `test_routing.py` | Routing tests: never crosses land, same point = 0 km, around Fehmarn, ETA, a blocking test term |
 | `real_data.py` | Real mode: finds DWD stations (Bright Sky), fetches and converts 14 days of observations into `data/real/current/`, cache + fallback, Open-Meteo comparison values |
 | `test_real_data.py` | Offline tests for the real-data path, using saved API answers in `tests/fixtures/` |
 | `tools.py` | The 6 tools (stations, observations, data quality, Holt-Winters forecast, sea-point estimate, write report) and their JSON specs |

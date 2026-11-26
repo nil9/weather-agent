@@ -48,7 +48,9 @@ Python tools do every calculation. The local LLM only picks which tools to call 
 
 | 24 | Chat: days resolved ONCE in code before the LLM answers, with typo tolerance ("tomrw", "tmrw", "fridy"), and told to the LLM ("This question is about Fri 27 Nov"); the same days drive badges, checks and added sentences. Mixed questions: the other topics are found before the answer, and answers that give advice on them are rejected | ✅ Done |
 
-*Last updated: end of step 24.*
+| 25 | Sea routing, phase 1: `routing.py` (≈1 km water grid over Kiel Bay from the land polygons, snap to the open sea, A* with 8 neighbours and no corner cutting, string-pulling smoothing with 200 m land margin), `GET /api/route`, Route tab (km / nm / ETA, default 6 kn); cost = distance + pluggable `CostTerm`s (none yet); `test_routing.py` | ✅ Done |
+
+*Last updated: end of step 25.*
 
 `experiments.py` doesn't change the diagrams. It imports `agent.py`, swaps the task, the system prompt
 or entries in `agent.TOOL_FUNCTIONS`, and redirects `write_report` to `reports/experiment_<scenario>.md`.
@@ -82,6 +84,8 @@ flowchart LR
 
     app["app.py<br/>FastAPI, 127.0.0.1:8000"]
     chat["chat.py<br/>topic gate + read-only<br/>tool loop + answer checks"]
+    routing["routing.py<br/>~1 km water grid, A*,<br/>smoothing, km / nm / ETA<br/>(code only, no LLM)"]
+    land[("data/land_kiel_bay.geojson<br/>Natural Earth land")]
     web["web/index.html<br/>Leaflet + OSM tiles (dark filter)<br/>Forecast / Ask tabs"]
     browser(["Browser"])
 
@@ -120,11 +124,15 @@ flowchart LR
     chat -->|"gate + chat loop"| llm
     chat -->|"read-only chat tools<br/>(sail_safety etc.)"| tools
     tools -->|"real: Open-Meteo for<br/>sail_safety, get_forecast"| real
+    browser -->|"Route tab: GET /api/route"| app
+    app -->|"route(start, end, speed)"| routing
+    land -->|"tools._land_km()"| routing
+    land -->|"land/sea check"| tools
 
     classDef done fill:#d4edda,stroke:#28a745,color:#155724
     classDef todo fill:#f1f3f5,stroke:#adb5bd,color:#495057,stroke-dasharray: 5 5
     classDef switchnode fill:#fff3cd,stroke:#d39e00,color:#664d03
-    class gen,data,tools,agent,llm,app,web,chat,compare,real,realdata,omcache,brightsky,openmeteo,outdummy,outreal done
+    class gen,data,tools,agent,llm,app,web,chat,compare,real,realdata,omcache,brightsky,openmeteo,outdummy,outreal,routing,land done
     class dsswitch switchnode
 ```
 
@@ -148,6 +156,12 @@ Notes:
   4 nearest pool stations, quality-checked in code. Each source has its own forecast file
   (`forecast_dummy.json`, `forecast_real.json`) and model comparison, and real reports go to `reports/real/`,
   so switching modes needs no new agent run.
+- Routing (`routing.py`) uses only the coastline, so it works the same with dummy and real data. A grid square is
+  water only if it doesn't touch the (unshrunk) land polygons; diagonal steps need both side squares, and smoothed
+  segments keep 200 m from land, so a route never crosses land. Edge cost = step length + the `extra()` of every
+  `CostTerm` (none in phase 1). Later terms plug in there: depth and restricted zones (`blocked`), time-dependent
+  weather and vessel density (`extra`). At 1 km, the inner Kiel Fjord and other passages under ~1 km wide are closed
+  (`CELL_KM = 0.5` opens them).
 - Open-Meteo: the agent never sees it. In real mode `sail_safety` (code) bases the verdict on the HIGHER max wind
   of our estimate and Open-Meteo and returns `wind_source`; the chat answer must name that source (checked in code).
   If Open-Meteo is unavailable, the verdict uses our estimate and says so. Dummy mode is unchanged.

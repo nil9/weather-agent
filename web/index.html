@@ -198,6 +198,16 @@
     border: 1px solid #4a4020; background: #2a2412; border-radius: 8px; padding: 6px 10px;
   }
 
+  .route-form { display: flex; align-items: center; gap: 8px; margin-top: 10px; font-size: 13px; }
+  .route-form input {
+    width: 70px; background: var(--bg); color: var(--text); border: 1px solid var(--line);
+    border-radius: 8px; padding: 6px 8px; font: inherit;
+  }
+  .route-form input:focus { outline: none; border-color: var(--sea); }
+  .route-result { margin-top: 12px; }
+  .route-result .big { font-size: 20px; font-weight: 700; }
+  .route-result .meta { color: var(--muted); font-size: 12px; margin-top: 4px; }
+
   /* Phones: map on top, panel below */
   @media (max-width: 760px) {
     .app { grid-template-columns: 1fr; grid-template-rows: 55vh auto; height: auto; }
@@ -214,10 +224,23 @@
     <div class="tabs" role="tablist">
       <button type="button" role="tab" id="tab-forecast" aria-controls="view-forecast" aria-selected="true">Forecast</button>
       <button type="button" role="tab" id="tab-chat" aria-controls="view-chat" aria-selected="false">Ask</button>
+      <button type="button" role="tab" id="tab-route" aria-controls="view-route" aria-selected="false">Route</button>
     </div>
 
     <section id="view-forecast" role="tabpanel" aria-labelledby="tab-forecast">
       <div class="sub">Loading…</div>
+    </section>
+
+    <section id="view-route" role="tabpanel" aria-labelledby="tab-route" hidden>
+      <div class="hint" id="route-hint">Click the start on the map, then the destination.</div>
+      <form class="route-form" id="route-form">
+        <label for="route-speed">Speed</label>
+        <input id="route-speed" type="number" min="1" max="40" step="0.5" value="6"> knots
+        <button type="button" class="point-btn" id="route-clear">Clear route</button>
+      </form>
+      <div class="route-result" id="route-result" aria-live="polite"></div>
+      <div class="note">Phase 1: shortest water route on a 1:10m coastline, about 1 km grid.
+        No depth, traffic or weather yet. Not for navigation.</div>
     </section>
 
     <section id="view-chat" role="tabpanel" aria-labelledby="tab-chat" hidden>
@@ -417,7 +440,11 @@ const counts = e => e.popup.options.className !== "busy";
 map.on("popupopen", e => { if (counts(e)) openPopups++; });
 map.on("popupclose", e => { if (counts(e)) openPopups = Math.max(0, openPopups - 1); });
 map.on("preclick", () => { ignoreClick = openPopups > 0; });
-map.on("click", e => { if (!ignoreClick) selectPoint(e.latlng.wrap()); });
+map.on("click", e => {
+  if (ignoreClick) return;
+  if (activeTab === "tab-route") routeClick(e.latlng.wrap());   // Route tab: set start / end
+  else selectPoint(e.latlng.wrap());                             // otherwise: the forecast point
+});
 
 async function selectPoint(latlng) {
   if (!defaultData) return;
@@ -685,13 +712,15 @@ fetch("/api/forecast")
   });
 
 // ---------------------------------------------------------------- tabs
-const TABS = [["tab-forecast", "view-forecast"], ["tab-chat", "view-chat"]];
+const TABS = [["tab-forecast", "view-forecast"], ["tab-chat", "view-chat"], ["tab-route", "view-route"]];
+let activeTab = "tab-forecast";        // the Route tab changes what a map click does
 function showTab(tabId) {
   TABS.forEach(([tab, view]) => {
     const active = tab === tabId;
     document.getElementById(tab).setAttribute("aria-selected", String(active));
     document.getElementById(view).hidden = !active;
   });
+  activeTab = tabId;
   if (tabId === "tab-chat") document.getElementById("chat-input").focus();
 }
 TABS.forEach(([tab]) => document.getElementById(tab).addEventListener("click", () => showTab(tab)));
@@ -806,6 +835,93 @@ function setupChat(data) {
     chips.append(chip);
   });
 }
+
+// ---------------------------------------------------------------- sea route (routing.py)
+// Two clicks: start, destination. The route is computed in code on the server (A* over a
+// ~1 km water grid, no LLM). A third click starts a new route.
+const routeLayer = L.layerGroup().addTo(map);
+let routeStart = null;                // the first click, waiting for the destination
+let lastRoute = null;                 // the last /api/route answer (for the speed change)
+
+function routeSpeed() {
+  const v = parseFloat(document.getElementById("route-speed").value);
+  return v >= 1 && v <= 40 ? v : 6;
+}
+
+function etaText(hours) {
+  const total = Math.round(hours * 60), h = Math.floor(total / 60), m = total % 60;
+  return h ? `${h} h ${String(m).padStart(2, "0")} min` : `${m} min`;
+}
+
+function routeMarker(latlng, label) {
+  L.circleMarker(latlng, { radius: 7, color: "#07131d", weight: 2, fillColor: "#ffd166", fillOpacity: 1 })
+    .bindTooltip(label, { permanent: true, direction: "right", offset: [8, 0], className: "label" })
+    .addTo(routeLayer);
+}
+
+function showRouteResult() {
+  const box = document.getElementById("route-result");
+  box.replaceChildren();
+  if (!lastRoute) return;
+  const r = lastRoute, speed = routeSpeed();
+  const eta = etaText(r.distance_nm / speed);      // ETA from the server's distance, any speed
+  box.append(el("div", "big", `${r.distance_km} km · ${r.distance_nm} nm`));
+  box.append(el("div", null, `ETA ${eta} at ${speed} knots`));
+  box.append(el("div", "meta",
+    `Start snapped ${r.start.snap_km} km to water, destination ${r.end.snap_km} km ` +
+    `(dashed). Grid ${r.cell_km} km, ${r.cells_expanded} squares searched.`));
+  return eta;
+}
+
+function clearRoute() {
+  routeLayer.clearLayers();
+  routeStart = null;
+  lastRoute = null;
+  showRouteResult();
+  document.getElementById("route-hint").textContent = "Click the start on the map, then the destination.";
+}
+
+async function routeClick(latlng) {
+  if (!routeStart || lastRoute) {                  // first click, or a new route after a finished one
+    clearRoute();
+    routeStart = latlng;
+    routeMarker(latlng, "Start");
+    document.getElementById("route-hint").textContent = "Now click the destination.";
+    return;
+  }
+  routeMarker(latlng, "Destination");
+  const hint = document.getElementById("route-hint");
+  hint.textContent = "Computing the route…";
+  const q = new URLSearchParams({
+    from_lat: routeStart.lat.toFixed(5), from_lon: routeStart.lng.toFixed(5),
+    to_lat: latlng.lat.toFixed(5), to_lon: latlng.lng.toFixed(5), speed_kn: routeSpeed(),
+  });
+  try {
+    const r = await fetch("/api/route?" + q);
+    const body = await r.json();
+    if (!r.ok) throw new Error(Array.isArray(body.detail) ? "Invalid points." : body.detail);
+    lastRoute = body;
+    const dashed = { color: "#ffd166", weight: 2, opacity: 0.8, dashArray: "4 6", interactive: false };
+    L.polyline([body.start.clicked, body.start.snapped], dashed).addTo(routeLayer);
+    L.polyline([body.end.snapped, body.end.clicked], dashed).addTo(routeLayer);
+    showRouteResult();
+    L.polyline(body.path.length > 1 ? body.path : [body.path[0], body.path[0]],
+               { color: "#ffd166", weight: 4, opacity: 0.95 })
+      .bindPopup(() => el("div", null,       // text only; ETA for the current speed
+        `${body.distance_km} km · ${body.distance_nm} nm · ETA ${etaText(body.distance_nm / routeSpeed())}`))
+      .addTo(routeLayer);
+    hint.textContent = "Click again to start a new route.";
+  } catch (err) {
+    routeLayer.clearLayers();
+    routeStart = null;
+    lastRoute = null;
+    hint.textContent = "Error: " + err.message + " Click a new start.";
+  }
+}
+
+document.getElementById("route-clear").addEventListener("click", clearRoute);
+document.getElementById("route-speed").addEventListener("input", showRouteResult);
+document.getElementById("route-form").addEventListener("submit", e => e.preventDefault());
 </script>
 </body>
 </html>

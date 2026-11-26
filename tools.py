@@ -660,16 +660,22 @@ def _to_km(lon: float, lat: float) -> tuple[float, float]:
 
 
 @functools.lru_cache(maxsize=1)
-def _inland_area():
-    """Land shrunk by COAST_TOLERANCE_KM, prepared for fast lookups. Loaded once."""
+def _land_km():
+    """All land polygons (unshrunk) in the local km grid. Loaded once. Used by the
+    land/sea check below and by routing.py (which must never touch land)."""
     path = _safe_path(DATA_DIR, LAND_FILE)
     if not path.exists():
         raise LandDataMissing("Land data missing: run `python download_land.py` once.")
     features = json.loads(path.read_text(encoding="utf-8"))["features"]
-    land_km = unary_union([shape(f["geometry"]) for f in features])
+    land = unary_union([shape(f["geometry"]) for f in features])
     # degrees -> local km grid (same scaling as _to_km, applied to all coordinates at once)
-    land_km = shapely.transform(land_km, lambda xy: xy * [_KM_PER_DEG_LON, _KM_PER_DEG_LAT])
-    return prep(land_km.buffer(-COAST_TOLERANCE_KM))      # negative buffer = shrink
+    return shapely.transform(land, lambda xy: xy * [_KM_PER_DEG_LON, _KM_PER_DEG_LAT])
+
+
+@functools.lru_cache(maxsize=1)
+def _inland_area():
+    """Land shrunk by COAST_TOLERANCE_KM, prepared for fast lookups. Loaded once."""
+    return prep(_land_km().buffer(-COAST_TOLERANCE_KM))   # negative buffer = shrink
 
 
 @functools.lru_cache(maxsize=4096)
