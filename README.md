@@ -81,9 +81,13 @@ then answers for that point. It needs an internet connection for the map tiles a
 library. The server only listens on localhost.
 
 The **Route** tab computes the shortest water route between two clicks (start, then destination)
+inside the routing area (Kiel Bay to the Fehmarnbelt, Rødsand and Gedser: 9.8–12.3° E, 54.15–55.3° N,
+drawn as a dashed boundary; a click outside it shows a note at the click and places no marker)
 on a 0.25 km grid: it avoids land, water shallower than your draft plus a safety margin (default
 2.0 + 1.0 m, EMODnet Bathymetry), and restricted zones from OpenStreetMap (no-entry areas always;
-firing areas like Todendorf and Putlos avoided or, if you choose, allowed with a high penalty), and
+firing areas like Todendorf and Putlos avoided or, if you choose, allowed with a high penalty),
+offshore wind farms (Rødsand II, Nysted; avoided or allowed with a penalty, and every turbine with a
+safety radius, default 500 m, drawn on the map), and
 keeps safety buffers (default 300 m from land, 500 m from closed zones). Shallow water is drawn as a
 blue hatched layer. The panel shows the distance in km and nautical miles, the ETA for your speed
 (default 6 knots), the minimum depth and buffer distances along the route, and a "Why this route?"
@@ -94,7 +98,14 @@ In the named narrow passages (Fehmarnsund, Kiel Fjord at Friedrichsort) the buff
 penalty mode the factor (0–20, default 10; 0 = zones cost nothing but are still listed) is set in the
 tab, and the 500 m buffer around a crossable zone is penalised, not blocked. Invalid values are
 marked in red instead of being replaced; any setting change recalculates the route. The Ask tab can explain a planned
-route ("Why does the route go north?"). Code only, no LLM. Firing areas count as always active, and
+route ("Why does the route go north?").
+
+**Weather along the route** (Route tab): set the departure time (default now). The route is cut into
+3 km legs; each leg shows the forecast for the time the boat passes it (wind in Beaufort, gusts,
+waves; real data: Open-Meteo Forecast + Marine, one batched request per API; dummy data: wind only),
+coloured green / yellow / red ("too rough" above Bft 6 or 1.5 m waves, adjustable). The
+"weather-aware" variant avoids rough legs where possible and is compared with the shortest route.
+In the Ask tab, "Is it safe along the way?" answers per leg with times. Code only, no LLM. Firing areas count as always active, and
 there is no traffic or weather yet, so it is not for navigation.
 
 The **Ask** tab is a chat about this forecast, e.g. "Is it safe to sail tomorrow?" or "Why is EAST
@@ -109,8 +120,9 @@ in both data modes (`--source dummy` or `--source real` for one).
 - Coastline: Natural Earth 1:10m land (public domain).
 - Water depth (Route tab): **EMODnet Bathymetry** Digital Terrain Model, © EMODnet Bathymetry Consortium,
   licensed **CC BY 4.0** (`data/depth_kiel_bay.npz`).
-- Restricted zones (Route tab): **© OpenStreetMap contributors**, licensed **ODbL**
-  (`data/restricted_zones_kiel_bay.geojson`, from OpenSeaMap tags via the Overpass API).
+- Restricted zones and wind farms (Route tab): **© OpenStreetMap contributors**, licensed **ODbL**
+  (`data/restricted_zones_kiel_bay.geojson` and `data/wind_farms_kiel_bay.geojson`, from OpenStreetMap
+  and OpenSeaMap tags via the Overpass API).
 - Real-mode observations: Deutscher Wetterdienst (DWD) via Bright Sky; model values: Open-Meteo.com (CC BY 4.0).
 - Map tiles: © OpenStreetMap contributors.
 
@@ -121,7 +133,7 @@ in both data modes (`--source dummy` or `--source real` for one).
 | `generate_data.py` | Writes `data/stations.json` and `data/observations.csv` (30 days, hourly) |
 | `download_land.py` | One-time download of Natural Earth 1:10m land polygons, clipped to Kiel Bay → `data/land_kiel_bay.geojson` (for the land/sea check) |
 | `routing.py` | Sea routing (Route tab): shortest water route on a 0.5 km grid over Kiel Bay (A*, no LLM) that keeps enough water depth for the draft and avoids restricted zones; distance in km / nm, ETA and minimum depth |
-| `download_routing_data.py` | One-time download: EMODnet Bathymetry depth (→ `data/depth_kiel_bay.npz`) and restricted zones from OpenStreetMap (→ `data/restricted_zones_kiel_bay.geojson`) |
+| `download_routing_data.py` | One-time download: EMODnet Bathymetry depth (→ `data/depth_kiel_bay.npz`), restricted zones (→ `data/restricted_zones_kiel_bay.geojson`) and offshore wind farms + turbines (→ `data/wind_farms_kiel_bay.geojson`) from OpenStreetMap; `--wind-only` for the wind farms alone |
 | `test_routing.py` | Routing tests: never crosses land, same point = 0 km, around Fehmarn, ETA; depth (shallow areas, draft changes the route), firing areas avoided, penalty mode |
 | `real_data.py` | Real mode: finds DWD stations (Bright Sky), fetches and converts 14 days of observations into `data/real/current/`, cache + fallback, Open-Meteo comparison values |
 | `test_real_data.py` | Offline tests for the real-data path, using saved API answers in `tests/fixtures/` |
