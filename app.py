@@ -10,11 +10,13 @@
                       -> Open-Meteo model values for the point (real data only), for comparison
   GET  /api/route?from_lat=..&from_lon=..&to_lat=..&to_lon=..&speed_kn=6&draft_m=2&margin_m=1&zones=block
               &land_buffer_m=300&zone_buffer_m=500&passage_land_buffer_m=50&passage_zone_buffer_m=100
-              &penalty_factor=10
+              &penalty_factor=10&wind_farms=block|penalty&turbine_radius_m=500
+              &weather=show|aware|off&departure=<ISO time, default now>
+              &wind_limit_bft=6&waves_limit_m=1.5
                       -> shortest water route (routing.py, code only, no LLM): land, depth, zones, buffers
   GET  /api/route_explain?(same parameters)
                       -> the route plus the detour breakdown (which rule added how many km)
-  GET  /api/route_zones -> the restricted zones (GeoJSON, OpenStreetMap) for the Route tab
+  GET  /api/route_zones -> the restricted zones and wind farms (GeoJSON, OpenStreetMap) for the Route tab
   GET  /api/route_shallow?draft_m=2&margin_m=1
                       -> water shallower than draft + margin (packed grid) for the map layer
 
@@ -27,6 +29,7 @@ length-checked; the LLM can only use read-only tools.
 Run:  python app.py   then open http://127.0.0.1:8000
 """
 import json
+from datetime import datetime
 from pathlib import Path
 from typing import Literal
 
@@ -127,6 +130,13 @@ class RouteRequest(BaseModel):
     passage_land_buffer_m: float = Field(routing.PASSAGE_LAND_BUFFER_M, ge=0, le=3000)
     passage_zone_buffer_m: float = Field(routing.PASSAGE_ZONE_BUFFER_M, ge=0, le=5000)
     penalty_factor: float = Field(routing.ZONE_PENALTY, ge=0, le=20)
+    wind_farms: Literal["block", "penalty"] = "block"
+    turbine_radius_m: float = Field(routing.TURBINE_RADIUS_M, ge=routing.TURBINE_RADIUS_RANGE[0],
+                                    le=routing.TURBINE_RADIUS_RANGE[1])
+    weather: Literal["off", "show", "aware"] = "show"
+    departure: datetime | None = None                      # None = now
+    wind_limit_bft: int = Field(6, ge=1, le=12)
+    waves_limit_m: float = Field(1.5, ge=0.1, le=10)
 
 
 class ChatRequest(BaseModel):
@@ -163,14 +173,23 @@ def sea_route(from_lat: float = Query(ge=-90, le=90), from_lon: float = Query(ge
               zone_buffer_m: float = Query(routing.ZONE_BUFFER_M, ge=0, le=5000),
               passage_land_buffer_m: float = Query(routing.PASSAGE_LAND_BUFFER_M, ge=0, le=3000),
               passage_zone_buffer_m: float = Query(routing.PASSAGE_ZONE_BUFFER_M, ge=0, le=5000),
-              penalty_factor: float = Query(routing.ZONE_PENALTY, ge=0, le=20)):
+              penalty_factor: float = Query(routing.ZONE_PENALTY, ge=0, le=20),
+              wind_farms: Literal["block", "penalty"] = "block",
+              turbine_radius_m: float = Query(routing.TURBINE_RADIUS_M, ge=routing.TURBINE_RADIUS_RANGE[0],
+                                              le=routing.TURBINE_RADIUS_RANGE[1]),
+              weather: Literal["off", "show", "aware"] = "show",
+              departure: datetime | None = None,
+              wind_limit_bft: int = Query(6, ge=1, le=12),
+              waves_limit_m: float = Query(1.5, ge=0.1, le=10)):
     """Shortest water route between two points, deep enough for the draft, outside (or
     penalising) restricted zones and keeping the safety buffers. Uses coastline, depth and
     zone data only, so it works the same with dummy and real weather data."""
     return _routing_call(routing.route, from_lat, from_lon, to_lat, to_lon, speed_kn, draft_m=draft_m,
                          margin_m=margin_m, zones=zones, land_buffer_m=land_buffer_m, zone_buffer_m=zone_buffer_m,
                          passage_land_buffer_m=passage_land_buffer_m, passage_zone_buffer_m=passage_zone_buffer_m,
-                         penalty_factor=penalty_factor)
+                         penalty_factor=penalty_factor, wind_farms=wind_farms, turbine_radius_m=turbine_radius_m,
+                         weather=weather, departure=departure,
+                         wind_limit_bft=wind_limit_bft, waves_limit_m=waves_limit_m)
 
 
 def _routing_call(func, *args, **kwargs):
@@ -193,12 +212,21 @@ def sea_route_explain(from_lat: float = Query(ge=-90, le=90), from_lon: float = 
                       zone_buffer_m: float = Query(routing.ZONE_BUFFER_M, ge=0, le=5000),
                       passage_land_buffer_m: float = Query(routing.PASSAGE_LAND_BUFFER_M, ge=0, le=3000),
                       passage_zone_buffer_m: float = Query(routing.PASSAGE_ZONE_BUFFER_M, ge=0, le=5000),
-                      penalty_factor: float = Query(routing.ZONE_PENALTY, ge=0, le=20)):
+                      penalty_factor: float = Query(routing.ZONE_PENALTY, ge=0, le=20),
+                      wind_farms: Literal["block", "penalty"] = "block",
+                      turbine_radius_m: float = Query(routing.TURBINE_RADIUS_M, ge=routing.TURBINE_RADIUS_RANGE[0],
+                                                      le=routing.TURBINE_RADIUS_RANGE[1]),
+                      weather: Literal["off", "show", "aware"] = "show",
+                      departure: datetime | None = None,
+                      wind_limit_bft: int = Query(6, ge=1, le=12),
+                      waves_limit_m: float = Query(1.5, ge=0.1, le=10)):
     """The detour breakdown: the same trip with the rules added one by one (code only)."""
     return _routing_call(routing.explain, from_lat, from_lon, to_lat, to_lon, speed_kn, draft_m=draft_m,
                          margin_m=margin_m, zones=zones, land_buffer_m=land_buffer_m, zone_buffer_m=zone_buffer_m,
                          passage_land_buffer_m=passage_land_buffer_m, passage_zone_buffer_m=passage_zone_buffer_m,
-                         penalty_factor=penalty_factor)
+                         penalty_factor=penalty_factor, wind_farms=wind_farms, turbine_radius_m=turbine_radius_m,
+                         weather=weather, departure=departure,
+                         wind_limit_bft=wind_limit_bft, waves_limit_m=waves_limit_m)
 
 
 @app.get("/api/route_shallow")
@@ -213,6 +241,13 @@ def route_zones():
         return routing.zones_geojson()
     except routing.RoutingDataMissing as exc:
         raise HTTPException(503, str(exc))
+
+
+@app.get("/api/route_area")
+def route_area():
+    """The routing area (drawn as a dashed boundary; clicks outside it are refused on the page)."""
+    lon0, lat0, lon1, lat1 = routing.ROUTE_BBOX
+    return {"lat_min": lat0, "lon_min": lon0, "lat_max": lat1, "lon_max": lon1}
 
 
 @app.post("/api/chat")

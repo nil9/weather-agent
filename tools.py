@@ -164,8 +164,16 @@ def _holt_winters(series: pd.Series, hours: int) -> np.ndarray:
     return fit.forecast(hours)
 
 
-def _forecast_station_daily(station: str, days: int) -> list[dict]:
-    """Forecast one station and summarise it per day (used by two tools)."""
+def _forecast_station_hourly(station: str, days: int) -> pd.DataFrame:
+    """Hourly Holt-Winters forecast of one station (temperature, pressure, wind), cached per
+    data source, station, length and observation file. Used by the daily summary below and by
+    route_weather.py (wind along a route in dummy mode)."""
+    path = _data_file("observations.csv")
+    return _forecast_station_hourly_cached(DATA_SOURCE, station, int(days), path.stat().st_mtime).copy()
+
+
+@functools.lru_cache(maxsize=64)
+def _forecast_station_hourly_cached(source: str, station: str, days: int, mtime: float) -> pd.DataFrame:
     df = _load_observations(station)
     train = df[df.index > df.index[-1] - pd.Timedelta(days=TRAIN_DAYS)]
 
@@ -179,7 +187,12 @@ def _forecast_station_daily(station: str, days: int) -> list[dict]:
     for col in ["temperature_c", "pressure_hpa", "wind_speed_ms"]:
         fc[col] = _holt_winters(train[col], hours)
     fc["wind_speed_ms"] = fc["wind_speed_ms"].clip(lower=0)  # wind can't be negative
+    return fc
 
+
+def _forecast_station_daily(station: str, days: int) -> list[dict]:
+    """Forecast one station and summarise it per day (used by two tools)."""
+    fc = _forecast_station_hourly(station, days)
     daily = []
     for date, day in fc.groupby(fc.index.date):
         row = {"date": str(date)}
@@ -969,13 +982,13 @@ def _sail_safety(data: dict, day: str) -> dict:
 
     if bft <= SAFE_MAX_BFT:
         level = 0
-        reasons = [f"max wind {wind} m/s = Beaufort {bft} (up to Bft {SAFE_MAX_BFT} is safe)"]
+        reasons = [f"max wind {wind} m/s = Beaufort {bft}; safe means Beaufort {SAFE_MAX_BFT} or less"]
     elif bft <= CAUTION_MAX_BFT:
         level = 1
-        reasons = [f"max wind {wind} m/s = Beaufort {bft} (Bft 5-6 means caution)"]
+        reasons = [f"max wind {wind} m/s = Beaufort {bft}; caution applies from Beaufort {SAFE_MAX_BFT + 1}"]
     else:
         level = 2
-        reasons = [f"max wind {wind} m/s = Beaufort {bft} (Bft 7 or more is not safe)"]
+        reasons = [f"max wind {wind} m/s = Beaufort {bft}; not safe from Beaufort {CAUTION_MAX_BFT + 1}"]
     if wind_reason:
         reasons.insert(0, wind_reason)
     if trend == "falling":
@@ -991,7 +1004,9 @@ def _sail_safety(data: dict, day: str) -> dict:
 
     return {"date": day, "wind_max_ms": wind, **wind_fields, "beaufort": bft,
             "pressure_trend": trend, "pressure_outlook": pressure_outlook(trend),
-            "verdict": VERDICTS[level], "reasons": reasons}
+            "verdict": VERDICTS[level], "reasons": reasons,
+            "thresholds_bft": {"safe_up_to": SAFE_MAX_BFT, "caution_from": SAFE_MAX_BFT + 1,
+                               "not_safe_from": CAUTION_MAX_BFT + 1}}
 
 
 def make_chat_tools(data: dict) -> dict:

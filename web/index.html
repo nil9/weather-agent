@@ -46,6 +46,7 @@
     color: var(--muted); margin: 22px 0 8px;
   }
   .sub { color: var(--muted); font-size: 12px; margin-top: 2px; }
+  .turbine-icon { background: none; border: none; }
   .pill {
     display: inline-flex; align-items: center; gap: 6px;
     padding: 3px 10px; border-radius: 999px; font-size: 12px; font-weight: 600;
@@ -174,6 +175,11 @@
   .msg details.tools summary:focus-visible { outline: 1px solid var(--muted); outline-offset: 2px; }
   .msg details.tools div { margin-top: 4px; }
   .msg .badges { margin-top: 8px; }
+  .msg .scope { display: block; width: fit-content; margin-bottom: 6px; padding: 1px 8px; border-radius: 10px;
+                font-size: 11px; color: var(--muted); border: 1px solid var(--line); white-space: normal; }
+  .msg details.tools table { border-collapse: collapse; margin-top: 4px; font-variant-numeric: tabular-nums; }
+  .msg details.tools th, .msg details.tools td { padding: 1px 6px; text-align: right; border-bottom: 1px solid var(--line); }
+  .msg details.tools th { font-weight: 600; }
   .badge.green { background: var(--ok); }
   .empty { color: var(--muted); font-size: 13px; }
   .chips { display: flex; flex-wrap: wrap; gap: 6px; margin: 6px 0 10px; }
@@ -210,6 +216,8 @@
   table.why td { text-align: right; padding: 3px 4px; border-top: 1px solid var(--line); }
   table.why td.reason { text-align: left; color: var(--muted); border-top: 0; padding-top: 0; }
   table.why tr.main td { color: var(--orange); }
+  table.legs td.st { font-weight: 700; }
+  table.legs td.green { color: #3ddc97; } table.legs td.yellow { color: var(--yellow); } table.legs td.red { color: var(--bad); }
   .route-result .warn { color: var(--orange); margin-top: 4px; font-size: 13px; }
   .route-form input {
     width: 70px; background: var(--bg); color: var(--text); border: 1px solid var(--line);
@@ -249,6 +257,19 @@
       <form class="route-form" id="route-form">
         <label for="route-speed">Speed</label>
         <input id="route-speed" type="number" min="1" max="40" step="0.5" value="6"> knots
+        <label for="route-departure">Departure</label>
+        <input id="route-departure" type="datetime-local" style="width: 190px">
+      </form>
+      <form class="route-form" id="route-weather-form">
+        <label for="route-variant">Route</label>
+        <select id="route-variant">
+          <option value="show" selected>shortest</option>
+          <option value="aware">weather-aware (avoid rough legs)</option>
+        </select>
+        <label for="route-wind-limit">too rough above Bft</label>
+        <input id="route-wind-limit" type="number" min="1" max="12" step="1" value="6">
+        <label for="route-waves-limit">or waves</label>
+        <input id="route-waves-limit" type="number" min="0.1" max="10" step="0.1" value="1.5"> m
       </form>
       <form class="route-form" id="route-boat">
         <label for="route-draft">Draft</label>
@@ -277,15 +298,27 @@
         <label for="route-penalty">factor</label>
         <input id="route-penalty" type="number" min="0" max="20" step="1" value="10"
                title="In penalty mode, each km inside a zone (or its buffer) counts as this many extra km; 0 = no cost">
+        <label for="route-wind-farms">Wind farms</label>
+        <select id="route-wind-farms" title="Offshore wind farm areas and turbines (OpenStreetMap); penalty mode uses the same factor">
+          <option value="block" selected>avoid</option>
+          <option value="penalty">allowed, with penalty</option>
+        </select>
+        <label for="route-turbine-radius">turbine radius (m)</label>
+        <input id="route-turbine-radius" type="number" min="50" max="2000" step="50" value="500"
+               title="Keep at least this far from every offshore wind turbine (the circle on the map)">
         <button type="button" class="point-btn" id="route-clear">Clear route</button>
       </form>
       <div class="route-result" id="route-result" aria-live="polite"></div>
+      <div class="route-result" id="route-legs" aria-live="polite"></div>
       <div class="route-result" id="route-why" aria-live="polite"></div>
       <div class="note">Shortest water route on a 0.25 km grid: land (Natural Earth), water depth for the
         draft plus margin (blue hatched = too shallow; depth: EMODnet Bathymetry, CC BY 4.0), restricted
-        zones (red = blocked or penalised, grey = exercise area, passage allowed; zones: © OpenStreetMap
-        contributors, ODbL) and the safety buffers. Firing areas are treated as always active.
-        No traffic or weather yet. Not for navigation.</div>
+        zones (red = blocked or penalised, grey = exercise area, passage allowed), offshore wind farms
+        (purple area; each turbine with its safety radius; zones and wind farms: © OpenStreetMap
+        contributors, ODbL, may be incomplete) and the safety buffers. Firing areas are treated as always active.
+        Weather along the route: the forecast for each leg at the time the boat passes it (real data:
+        Open-Meteo.com, CC BY 4.0; dummy data: the dummy forecast, wind only). No traffic yet.
+        Not for navigation.</div>
     </section>
 
     <section id="view-chat" role="tabpanel" aria-labelledby="tab-chat" hidden>
@@ -804,6 +837,23 @@ function describeTool(t) {
   return `${t.name}(${args})`;
 }
 
+// The legs of a route-weather answer as a small table (text only, built from numbers).
+function legsTable(legs) {
+  const table = el("table");
+  const head = el("tr");
+  ["Leg", "Time UTC", "Position", "Wind", "Gusts", "Waves", "Status"].forEach(h => head.append(el("th", null, h)));
+  table.append(head);
+  legs.forEach(g => {
+    const row = el("tr");
+    [g.leg, g.time_utc.slice(11, 16), `${g.lat.toFixed(2)}° N ${g.lon.toFixed(2)}° E`, `Bft ${g.wind_bft}`,
+     g.gust_bft === null ? "–" : `Bft ${g.gust_bft}`, g.waves_m === null ? "–" : `${g.waves_m} m`,
+     { green: "ok", yellow: "caution", red: "too rough" }[g.status] || g.status]
+      .forEach(v => row.append(el("td", null, String(v))));
+    table.append(row);
+  });
+  return table;
+}
+
 let busy = false;                     // one question at a time (also blocks the chips)
 
 async function ask(question) {
@@ -829,6 +879,10 @@ async function ask(question) {
     }
     thinking.remove();
     const msg = addMessage("bot", body.answer);
+    if (body.scope && body.scope.length) {
+      // What the answer is about ("Along your route" / "Sea point: …"), above the text.
+      msg.prepend(el("span", "scope", body.scope.join(" · ")));
+    }
     if (body.safety.length) {
       const badges = el("div", "badges");
       body.safety.forEach(s => badges.append(el("span", "badge " + VERDICT_COLOR[s.verdict],
@@ -838,8 +892,9 @@ async function ask(question) {
     if (body.tools_used.length) {
       // Which tools ran: for the curious, closed by default (internal names stay out of the answer).
       const details = el("details", "tools");
-      details.append(el("summary", null, "Details"),
-                     el("div", null, "tools: " + body.tools_used.map(describeTool).join(", ")));
+      details.append(el("summary", null, "Details"));
+      if (body.route_legs && body.route_legs.length) details.append(legsTable(body.route_legs));
+      details.append(el("div", null, "tools: " + body.tools_used.map(describeTool).join(", ")));
       msg.append(details);
     }
     chatHistory.push({ role: "user", content: question }, { role: "assistant", content: body.answer });
@@ -856,9 +911,17 @@ async function ask(question) {
 
 // When the selected point changes, earlier answers are about another place:
 // clear the history (so follow-ups don't mix points) and say so in the log.
+// "Answering for:" names the planned route if there is one, else the selected point.
+function updateChatHeader() {
+  const name = currentData ? pointName(currentData) : "…";
+  document.getElementById("chat-point").textContent = "Answering for: " + (routeRequest && lastRoute
+    ? `Your route: ${lastRoute.start.name} → ${lastRoute.end.name} (weather along it; other questions: ${name})`
+    : name);
+}
+
 function pointChanged() {
   const name = currentData ? pointName(currentData) : "…";
-  document.getElementById("chat-point").textContent = "Answering for: " + name;
+  updateChatHeader();
   if (chatHistory.length) {
     chatHistory.length = 0;
     addMessage("note", "Now answering for " + name + ".");
@@ -903,12 +966,26 @@ const ROUTE_INPUTS = [
   ["route-passage-land", "passage_land_buffer_m", 0, 3000, "Passage land buffer (m)"],
   ["route-passage-zone", "passage_zone_buffer_m", 0, 5000, "Passage zone buffer (m)"],
   ["route-penalty", "penalty_factor", 0, 20, "Penalty factor"],
+  ["route-turbine-radius", "turbine_radius_m", 50, 2000, "Turbine radius (m)"],
+  ["route-wind-limit", "wind_limit_bft", 1, 12, "Wind limit (Bft)"],
+  ["route-waves-limit", "waves_limit_m", 0.1, 10, "Wave limit (m)"],
 ];
+
+// Departure: local time in the form, sent as UTC (default: now).
+(function initDeparture() {
+  const now = new Date(Date.now() - new Date().getTimezoneOffset() * 60000);
+  document.getElementById("route-departure").value = now.toISOString().slice(0, 16);
+})();
 
 class SettingsError extends Error {}
 
 function routeSettings() {
-  const settings = { zones: document.getElementById("route-zones").value }, errors = [];
+  const settings = { zones: document.getElementById("route-zones").value,
+                     wind_farms: document.getElementById("route-wind-farms").value,
+                     weather: document.getElementById("route-variant").value }, errors = [];
+  const dep = new Date(document.getElementById("route-departure").value);
+  if (isNaN(dep)) errors.push("Departure must be a date and time");
+  else settings.departure = dep.toISOString();
   ROUTE_INPUTS.forEach(([id, key, min, max, label]) => {
     const input = document.getElementById(id);
     const text = input.value.trim();
@@ -943,7 +1020,7 @@ const km = v => v === null || v === undefined ? "–" : `${Math.round(v * 1000)}
 function showRouteResult() {
   const box = document.getElementById("route-result");
   box.replaceChildren();
-  if (!lastRoute) { showWhy(); return; }
+  if (!lastRoute) { showLegs(); showWhy(); return; }
   const r = lastRoute, speed = routeSpeed();
   if (routeRequest) routeRequest.speed_kn = speed;
   box.append(el("div", "big", `${r.distance_km} km · ${r.distance_nm} nm`));
@@ -957,10 +1034,15 @@ function showRouteResult() {
     (r.min_zone_distance_km !== null
       ? ` and ≥ ${km(r.min_zone_distance_km)} from closed zones (buffer ${r.settings.zone_buffer_m} m, nearest: ${r.nearest_zone})`
       : "")));
+  if (r.min_turbine_distance_km !== null && r.min_turbine_distance_km !== undefined) {
+    box.append(el("div", null, `Keeps ≥ ${km(r.min_turbine_distance_km)} from wind turbines ` +
+                              `(radius ${r.turbine_radius_m} m, nearest: ${r.nearest_turbine})`));
+  }
   if (r.zones_crossed.length) box.append(el("div", "warn", "Crosses (penalty): " + r.zones_crossed.join(", ")));
   if (r.exercise_areas_crossed.length) {
     box.append(el("div", "meta", "Passes exercise area (passage allowed): " + r.exercise_areas_crossed.join(", ")));
   }
+  if (r.via && r.via.length) box.append(el("div", null, "Via: " + r.via.join(" → ")));
   if (r.passage_warning) box.append(el("div", "warn", "⚠ " + r.passage_warning));
   if (r.alternative) {
     const a = r.alternative;
@@ -973,6 +1055,7 @@ function showRouteResult() {
   box.append(el("div", "meta",
     `Start snapped ${r.start.snap_km} km to usable water, destination ${r.end.snap_km} km (dashed). ` +
     `Grid ${r.cell_km} km.`));
+  showLegs();
   showWhy();
 }
 
@@ -1011,6 +1094,63 @@ function showWhy() {
   box.append(el("div", "meta", lastExplain.main_reason_sentence));      // built in code (routing.explain)
 }
 
+const LEG_COLOR = { green: "#3ddc97", yellow: "#ffd166", red: "#ff5d5d" };
+const STATUS_TEXT = { green: "calm", yellow: "caution", red: "too rough" };
+const hhmm = iso => new Date(iso).toLocaleTimeString("en-GB", { hour: "2-digit", minute: "2-digit" });
+
+function legText(g) {
+  return `Leg ${g.leg} (km ${g.from_km}–${g.to_km}) at ${hhmm(g.time_utc)}: Beaufort ${g.wind_bft}` +
+    (g.gust_ms !== null ? `, gusts ${g.gust_ms} m/s` : "") +
+    (g.waves_m !== null ? `, waves ${g.waves_m} m` : "") + ` · ${STATUS_TEXT[g.status]}`;
+}
+
+// Weather along the route: one row per leg (time the boat passes it, place, wind, waves).
+function showLegs() {
+  const box = document.getElementById("route-legs");
+  box.replaceChildren();
+  const w = lastRoute && lastRoute.weather;
+  if (!w) return;
+  box.append(el("h2", null, "Weather along the route"));
+  const worst = w.worst;
+  if (worst) {
+    box.append(el("div", worst.status === "red" ? "warn" : null,
+      `Worst on this route: ${legText(worst)}. ${w.rough_count} of ${w.legs.length} legs too rough ` +
+      `(above Bft ${w.limits.wind_limit_bft} or waves above ${w.limits.waves_limit_m} m).`));
+  }
+  if (w.shortest) {
+    const s = w.shortest;
+    const t = el("table", "why");
+    const head = el("tr");
+    ["", "Distance", "ETA", "Worst", "Rough legs"].forEach(h => head.append(el("th", null, h)));
+    t.append(head);
+    [["Shortest", s], ["Weather-aware", { ...w, distance_km: lastRoute.distance_km, eta_text: lastRoute.eta_text }]]
+      .forEach(([name, v]) => {
+        const tr = el("tr");
+        tr.append(el("td", null, name), el("td", null, `${v.distance_km} km`), el("td", null, v.eta_text),
+                  el("td", null, `Bft ${v.max_wind_bft}` + (v.max_waves_m !== null ? `, ${v.max_waves_m} m` : "")),
+                  el("td", null, String(v.rough_count)));
+        t.append(tr);
+      });
+    box.append(t);
+  }
+  const table = el("table", "why legs");
+  const head = el("tr");
+  ["Time", "Place", "Wind", "Waves", ""].forEach(h => head.append(el("th", null, h)));
+  table.append(head);
+  w.legs.forEach(g => {
+    const tr = el("tr");
+    tr.append(el("td", null, hhmm(g.time_utc)),
+              el("td", null, `km ${g.from_km}–${g.to_km}`),
+              el("td", null, `Bft ${g.wind_bft}` + (g.gust_ms !== null ? ` (gusts ${g.gust_ms})` : "")),
+              el("td", null, g.waves_m === null ? "–" : `${g.waves_m} m`),
+              el("td", "st " + g.status, STATUS_TEXT[g.status]));
+    table.append(tr);
+  });
+  box.append(table);
+  box.append(el("div", "meta", `Departure ${new Date(w.departure_utc).toLocaleString("en-GB")} (your local time). ` +
+    `Weather: ${w.source}.` + (w.note ? ` Note: ${w.note}.` : "")));
+}
+
 function clearRoute() {
   routeRun++;                                      // cancels a computation still running
   routeLayer.clearLayers();
@@ -1019,11 +1159,47 @@ function clearRoute() {
   lastRoute = null;
   lastExplain = null;
   routeRequest = null;
+  updateChatHeader();
   showRouteResult();
   document.getElementById("route-hint").textContent = "Click the start on the map, then the destination.";
 }
 
+// The routing area (/api/route_area): a thin dashed boundary while the Route tab is open.
+// A click outside it places no marker; the reason is shown at the click, the route stays.
+const routeAreaLayer = L.layerGroup();
+let routeArea = null;                 // {lat_min, lon_min, lat_max, lon_max}, once loaded
+
+async function loadRouteArea() {
+  if (routeArea) return;
+  try {
+    const r = await fetch("/api/route_area");
+    if (!r.ok) return;                             // the server still rejects outside clicks
+    routeArea = await r.json();
+    L.rectangle([[routeArea.lat_min, routeArea.lon_min], [routeArea.lat_max, routeArea.lon_max]],
+                { color: "#8aa4b8", weight: 1, opacity: 0.8, dashArray: "6 6", fill: false, interactive: false })
+      .addTo(routeAreaLayer);
+  } catch (err) { /* same: the server check stays */ }
+}
+
+function insideRouteArea(latlng) {
+  const a = routeArea;
+  return !a || (latlng.lat >= a.lat_min && latlng.lat <= a.lat_max && latlng.lng >= a.lon_min && latlng.lng <= a.lon_max);
+}
+
+function outsideRouteAreaNote(latlng) {
+  const a = routeArea;
+  L.popup({ closeButton: false, className: "busy" }).setLatLng(latlng)
+    .setContent(el("div", "error", `Outside the routing area (${a.lat_min}–${a.lat_max}° N, ` +
+                                   `${a.lon_min}–${a.lon_max}° E). Click inside the dashed boundary.`))
+    .openOn(map);
+}
+
 async function routeClick(latlng) {
+  if (!insideRouteArea(latlng)) {                  // no marker; the current route stays as it is
+    outsideRouteAreaNote(latlng);
+    return;
+  }
+  map.closePopup();                                // an earlier "outside" note
   if (!routeStart || lastRoute) {                  // first click, or a new route after a finished one
     clearRoute();
     routeStart = latlng;
@@ -1066,6 +1242,7 @@ async function computeRoute(from, to) {
     lastRoute = body;
     lastExplain = null;
     routeRequest = request;
+    updateChatHeader();
     routeStart = from;
     routeEnds = [from, to];
     if (body.alternative && body.alternative.path) {          // full-buffer alternative: grey dashed
@@ -1077,11 +1254,23 @@ async function computeRoute(from, to) {
     L.polyline([body.start.clicked, body.start.snapped], dashed).addTo(routeLayer);
     L.polyline([body.end.snapped, body.end.clicked], dashed).addTo(routeLayer);
     showRouteResult();
-    L.polyline(body.path.length > 1 ? body.path : [body.path[0], body.path[0]],
-               { color: "#ffd166", weight: 4, opacity: 0.95 })
-      .bindPopup(() => el("div", null,       // text only; ETA for the current speed
-        `${body.distance_km} km · ${body.distance_nm} nm · ETA ${etaText(body.distance_nm / routeSpeed())}`))
-      .addTo(routeLayer);
+    const w = body.weather;
+    if (w && w.shortest && w.shortest.path && JSON.stringify(w.shortest.path) !== JSON.stringify(body.path)) {
+      L.polyline(w.shortest.path, { color: "#8aa4b8", weight: 2, opacity: 0.9, dashArray: "2 6" })
+        .bindPopup(() => el("div", null, `Shortest route: ${w.shortest.distance_km} km, ${w.shortest.rough_count} rough legs`))
+        .addTo(routeLayer);
+    }
+    if (w && w.legs.length && w.legs[0].coords) {
+      w.legs.forEach(g => L.polyline(g.coords, { color: LEG_COLOR[g.status], weight: 5, opacity: 0.95 })
+        .bindPopup(() => el("div", null, legText(g)))
+        .addTo(routeLayer));
+    } else {
+      L.polyline(body.path.length > 1 ? body.path : [body.path[0], body.path[0]],
+                 { color: "#ffd166", weight: 4, opacity: 0.95 })
+        .bindPopup(() => el("div", null,       // text only; ETA for the current speed
+          `${body.distance_km} km · ${body.distance_nm} nm · ETA ${etaText(body.distance_nm / routeSpeed())}`))
+        .addTo(routeLayer);
+    }
     hint.textContent = "Click again to start a new route. Changing a setting recalculates this one.";
     loadExplain(request, body);
   } catch (err) {
@@ -1089,6 +1278,7 @@ async function computeRoute(from, to) {
     lastRoute = null;
     lastExplain = null;
     routeRequest = null;
+    updateChatHeader();
     routeEnds = [from, to];                        // keep the points: a new setting may make it possible
     routeStart = null;                             // ...but the next click starts a new route
     showRouteResult();
@@ -1099,7 +1289,9 @@ async function computeRoute(from, to) {
 // Any route setting changes -> recalculate the current route (debounced).
 let recalcTimer = null;
 ["route-speed", "route-draft", "route-margin", "route-land-buffer", "route-zone-buffer",
- "route-passage-land", "route-passage-zone", "route-zones", "route-penalty"].forEach(id =>
+ "route-passage-land", "route-passage-zone", "route-zones", "route-penalty", "route-departure",
+ "route-wind-farms", "route-turbine-radius",
+ "route-variant", "route-wind-limit", "route-waves-limit"].forEach(id =>
   ["input", "change"].forEach(type => document.getElementById(id).addEventListener(type, () => {
     clearTimeout(recalcTimer);
     recalcTimer = setTimeout(() => { if (routeEnds) computeRoute(routeEnds[0], routeEnds[1]); }, 500);
@@ -1119,14 +1311,33 @@ async function loadExplain(request, forRoute) {
 }
 
 document.getElementById("route-clear").addEventListener("click", clearRoute);
-["route-form", "route-boat", "route-buffers", "route-passages", "route-zones-form"].forEach(id =>
+["route-form", "route-weather-form", "route-boat", "route-buffers", "route-passages", "route-zones-form"].forEach(id =>
   document.getElementById(id).addEventListener("submit", e => e.preventDefault()));
 document.getElementById("route-speed").addEventListener("input", showRouteResult);
 
-// Restricted zones (/api/route_zones, OpenStreetMap): drawn only while the Route tab is open.
-// Red = firing / restricted / no-entry (blocked or penalised), grey dashed = exercise area.
+// Restricted zones and wind farms (/api/route_zones, OpenStreetMap): drawn only while the Route
+// tab is open. Red = firing / restricted / no-entry (blocked or penalised), grey dashed = exercise
+// area, purple = wind farm area; each offshore turbine is a small icon with its safety radius
+// (a dashed circle that follows the "turbine radius" setting).
 const zonesLayer = L.layerGroup();
-let zonesLoaded = false;
+const turbineRadiusLayer = L.layerGroup().addTo(zonesLayer);
+let zonesLoaded = false, turbines = [];
+const WIND_COLOR = "#c38bff";
+const TURBINE_ICON = L.divIcon({ className: "turbine-icon", iconSize: [14, 14], iconAnchor: [7, 7],
+  html: '<svg viewBox="-7 -7 14 14" width="14" height="14" aria-hidden="true">' +
+        '<g stroke="#c38bff" stroke-width="1.6" stroke-linecap="round">' +
+        '<line x1="0" y1="0" x2="0" y2="-6"/><line x1="0" y1="0" x2="5.2" y2="3"/>' +
+        '<line x1="0" y1="0" x2="-5.2" y2="3"/></g><circle r="1.6" fill="#c38bff"/></svg>' });
+
+function drawTurbineRadius() {
+  turbineRadiusLayer.clearLayers();
+  const input = document.getElementById("route-turbine-radius");
+  const radius = Number(input.value);
+  if (!(radius >= 50 && radius <= 2000)) return;   // invalid: marked red by routeSettings
+  turbines.forEach(latlng => L.circle(latlng, { radius, color: WIND_COLOR, weight: 1, opacity: 0.6,
+    dashArray: "3 4", fillColor: WIND_COLOR, fillOpacity: 0.06, interactive: false }).addTo(turbineRadiusLayer));
+}
+document.getElementById("route-turbine-radius").addEventListener("input", drawTurbineRadius);
 
 async function loadZones() {
   if (zonesLoaded) return;
@@ -1135,14 +1346,24 @@ async function loadZones() {
     const r = await fetch("/api/route_zones");
     if (!r.ok) throw new Error((await r.json()).detail || r.statusText);
     const data = await r.json();
+    turbines = [];
     L.geoJSON(data, {
       interactive: true,
       style: f => f.properties.category === "exercise"
         ? { color: "#8aa4b8", weight: 1, dashArray: "4 4", fillOpacity: 0.04 }
-        : { color: "#ff5d5d", weight: 1, fillColor: "#ff5d5d", fillOpacity: 0.15 },
+        : f.properties.category === "wind_farm"
+          ? { color: WIND_COLOR, weight: 1, fillColor: WIND_COLOR, fillOpacity: 0.12 }
+          : { color: "#ff5d5d", weight: 1, fillColor: "#ff5d5d", fillOpacity: 0.15 },
+      pointToLayer: (f, latlng) => {                       // only turbines are points
+        turbines.push(latlng);
+        return L.marker(latlng, { icon: TURBINE_ICON, keyboard: false });
+      },
       onEachFeature: (f, layer) => layer.bindTooltip(       // plain text: a DOM node, not HTML
-        el("span", null, `${f.properties.name} (${f.properties.category.replace("_", " ")})`), { sticky: true }),
+        el("span", null, f.properties.kind === "turbine"
+          ? `Wind turbine (${f.properties.name})`
+          : `${f.properties.name} (${f.properties.category.replace("_", " ")})`), { sticky: true }),
     }).addTo(zonesLayer);
+    drawTurbineRadius();
   } catch (err) {
     zonesLoaded = false;
     document.getElementById("route-hint").textContent = "Zones not shown: " + err.message;
@@ -1202,7 +1423,7 @@ async function loadShallow() {
 // Route tab view: route layers (zones, shallow water) on; the forecast point, station lines
 // and labels off, so the route is easy to read. Leaving the tab restores them.
 const ROUTE_ATTRIBUTION = 'Depth: <a href="https://emodnet.ec.europa.eu/en/bathymetry">EMODnet Bathymetry</a> (CC BY 4.0) · ' +
-  'Zones: © <a href="https://www.openstreetmap.org/copyright">OpenStreetMap</a> contributors (ODbL)';
+  'Zones, wind farms: © <a href="https://www.openstreetmap.org/copyright">OpenStreetMap</a> contributors (ODbL)';
 
 function setRouteView(on) {
   if (on) {
@@ -1210,12 +1431,16 @@ function setRouteView(on) {
     map.removeLayer(areaLayer);
     zonesLayer.addTo(map);
     shallowLayer.addTo(map);
+    routeAreaLayer.addTo(map);
     map.attributionControl.addAttribution(ROUTE_ATTRIBUTION);
     loadZones();
     loadShallow();
+    loadRouteArea();
   } else {
     map.removeLayer(zonesLayer);
     map.removeLayer(shallowLayer);
+    map.removeLayer(routeAreaLayer);
+    map.closePopup();                              // an "outside the routing area" note
     map.attributionControl.removeAttribution(ROUTE_ATTRIBUTION);
     pointLayer.addTo(map);
     areaLayer.addTo(map);

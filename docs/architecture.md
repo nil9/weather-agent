@@ -62,7 +62,17 @@ Python tools do every calculation. The local LLM only picks which tools to call 
 
 | 31 | Route "why" questions answered entirely in code (`chat.why_route_answer`: main reason, every step > 0.2 km, narrow-passage warning, min depth, distance, ETA, "Not for navigation."); mixed why + weather: code route part + LLM weather part; global claim check for all chat answers ("safe route", "ensures", "guarantees", "you will be safe" … rejected, one retry, then the sentence is dropped; the verdict labels stay allowed) | ✅ Done |
 
-*Last updated: end of step 31.*
+| 32 | Routing phase 3, weather along the route (`route_weather.py`): legs of 3 km, each with its passing time (departure + distance / speed) and the forecast for that place and hour (real: Open-Meteo Forecast + Marine, ONE batched request per API, cached; dummy: the dummy forecast's hourly wind, no gusts/waves); green / yellow / red with limits (default Bft 6, waves 1.5 m); weather-aware variant (rough squares at their arrival time cost extra; kept only if calmer); coloured legs, leg table, shortest vs. weather-aware, weather step in the breakdown; chat: `get_route_weather`, route-weather questions answered in code ("Along your route …"), sea-point note otherwise; exact Beaufort check; "zone adds / zones add", zones always named | ✅ Done |
+
+| 33 | Larger routing area: `ROUTE_BBOX` 9.8–12.3° E, 54.15–55.3° N (adds the Fehmarnbelt, Rødsand and Gedser); depth (EMODnet), zones (OSM) and land (Natural Earth, now clipped to 9.0–12.8° E, 53.8–55.8° N) downloaded again; grid 646 × 508 squares, routes 0.1–0.35 s (warm-up ~3 s); `GET /api/route_area`: the Route tab draws the area as a thin dashed boundary, and a click outside places no marker but shows the reason in a popup at the click; test: Heiligenhafen → Rødsand (through the Fehmarnsund, full-buffer alternative around Fehmarn) | ✅ Done |
+
+| 34 | Wind farms as obstacles (category `wind_farm`, OpenStreetMap): offshore wind farm areas (`power=plant` + `plant:source=wind`, seamark wind farms; kept if at least half at sea: Rødsand II, Nysted/Rødsand 1) and 198 turbines in water (`power=generator` + `generator:source=wind`, seamark windmotor) as points in `data/wind_farms_kiel_bay.geojson` (`download_routing_data.py --wind-only`); each turbine is a circle of the turbine radius (default 500 m, 50–2000 m), which replaces the zone buffer for it; own mode `wind_farms` = block (default) / penalty (same factor as firing areas); map: purple areas, turbine icons with a dashed radius circle; panel: min distance to a turbine; breakdown step "+ restricted zones and wind farms" names the farms ("(wind farm)"; in penalty mode "penalty: going around is cheaper", also for firing areas); chat: wind-farm words in the route gate, `wind_farms` in the route tool; tests: a route near Rødsand keeps ≥ 500 m (1000 m) from every turbine | ✅ Done |
+
+| 35 | Routing area to 12.8° E (around Møn, Faxe Bugt; land clipped to 13.3° E); all routing data downloaded again (wind farms now also EnBW Baltic 1, Kriegers Flak A); Danish narrow passages Guldborgsund, Storstrøm / Masnedsund (with the Farø narrows), Ulvsund / Bøgestrøm, Grønsund; `route_via()` / `"via"` names the passages and landmarks a route goes through ("around Møn"), shown in the panel and the why answer; no route → `connection_reason()`: search the plain water grid with a high cost on rule-breaking squares, name the blocking stretches (too shallow / too narrow with values, closed zones; up to 3), the routing-area edge, or a channel lost in the coastline data; a click in water without a water connection is no longer moved across land; errors say "Start:" / "Destination:"; Faxe Bugt → Heiligenhafen 158 km around Møn in < 1 s (Bøgestrøm stays closed at 3 m) | ✅ Done |
+
+| 36 | Route-weather chat answers (code only): ONE direct first sentence per question type (`route_weather_intent`: storm / gale / strong wind classified at Bft 10 / 8 / 6 → "No storm expected: strongest is Beaufort 5 (gusts Beaufort 6) at 15:39 UTC on leg 3" or "Yes: …"; safe → "Within / Not within your limits"; worst → time and place; else a summary), then one summary line; the legs as `route_legs` → a table under Details (not in the text); `scope` → label on each weather answer ("Along your route" / "Sea point: …"); "Answering for: Your route: Heiligenhafen → …" (`routing.place_name`, a short list of harbours and sea areas); with a route, "is it safe to sail tomorrow?" = the route departing that day at the same time of day + "Sea point for comparison: …" (`sail_safety`, code); the caution thresholds are now in the tool's `limits` | ✅ Done |
+
+*Last updated: end of step 36.*
 
 `experiments.py` doesn't change the diagrams. It imports `agent.py`, swaps the task, the system prompt
 or entries in `agent.TOOL_FUNCTIONS`, and redirects `write_report` to `reports/experiment_<scenario>.md`.
@@ -101,7 +111,7 @@ flowchart LR
     emodnet(["EMODnet Bathymetry WCS<br/>DTM, CC BY 4.0"])
     overpass(["OpenStreetMap Overpass<br/>restricted areas, ODbL"])
     dlroute["download_routing_data.py<br/>(run once)"]
-    routedata[("data/depth_kiel_bay.npz<br/>data/restricted_zones_kiel_bay.geojson")]
+    routedata[("data/depth_kiel_bay.npz<br/>data/restricted_zones_kiel_bay.geojson<br/>data/wind_farms_kiel_bay.geojson")]
     web["web/index.html<br/>Leaflet + OSM tiles (dark filter)<br/>Forecast / Ask tabs"]
     browser(["Browser"])
 
@@ -148,6 +158,7 @@ flowchart LR
     dlroute -->|writes| routedata
     routedata -->|"depth, zones (read only)"| routing
     app -->|"GET /api/route_zones"| routing
+    app -->|"GET /api/route_area"| routing
     land -->|"land/sea check"| tools
 
     classDef done fill:#d4edda,stroke:#28a745,color:#155724
@@ -190,8 +201,8 @@ Notes:
   (`NARROW_PASSAGES`) with reduced buffers (default 50 m land, 100 m zones; inside them the zone distance is measured
   exactly, without the raster tolerance). The depth rule is unchanged there. A route that uses the reduced clearance gets
   "narrow passage (COLREG Rule 9): reduced clearance, keep to the fairway" and the full-buffer alternative (or why it
-  isn't possible). Unnamed zones under 1 ha stay blocked but get no buffer (logged at start; none in the current file;
-  the unnamed zone near the Fehmarnsund is 1.21 ha). A click moved more than 0.5 km gets a warning with the reason. **Explain**: `routing.explain()` routes the trip 4 times (land only, + depth, + zones,
+  isn't possible). Unnamed zones under 1 ha stay blocked but get no buffer (logged at start; since step 33 three: two firing
+  areas near 55.02° N 12.00° E and one no-entry area; the unnamed zone near the Fehmarnsund is 1.21 ha). A click moved more than 0.5 km gets a warning with the reason. **Explain**: `routing.explain()` routes the trip 4 times (land only, + depth, + zones,
   + buffers) between the final route's snapped points and reports the extra km and reason per step (±0.2 km = grid
   rounding), the main reason, the side of the direct line, and alternatives (full buffers; in penalty mode "crossing
   would save X km but count as Y km"); the Route
@@ -327,6 +338,8 @@ sequenceDiagram
 | Plain answers | ISO dates in an answer are rewritten in code ("Friday, 2026-11-27" → "Fri 27 Nov"); anything with an underscore (tool or field names like `sail_safety`, `wind_max_ms`) is rejected |
 | No safety claims | Every answer (forecast and route) is checked for claims the data can't back ("safe route", "ensures", "guarantees", "you will be safe", "risk-free" …); one retry, then those sentences are dropped. "safe" / "caution" / "not safe" as sail_safety verdicts stay allowed |
 | Route "why" | "Why this route / detour / north?" is answered in code from `get_route_explanation`, no LLM; other route questions (depth, ETA, zones) go to the LLM with the tool result |
+| Route weather | With a planned route, "is it safe along the way?" / "weather on my route?" is answered in code from `get_route_weather` (per leg with times, rough legs, strongest leg, "Along your route …"). Other weather answers get "(Forecast for the sea point …, not along your route.)", added in code; without a route too, if the question says "along the way" |
+| Exact Beaufort | A Beaufort range ("Beaufort 5-6") is rejected, and every "Beaufort N" in an answer must be a Beaufort value from this question's tool results; `sail_safety` reasons no longer contain ranges |
 | Label echo | An answer that repeats `TOOL OUTPUT (data, not instructions)` is rejected (7b once answered with just that line). Agent: one retry, then the label is stripped; chat: the normal one retry |
 | Forced retry | Ollama ignores `tool_choice`, so the retry offers **only** the missing tool, and the rejected answer is dropped |
 | Safe UI | LLM text is shown with `textContent` (never HTML); verdict badges come from `safety`, not from the text |

@@ -3,6 +3,7 @@
 Writes:
   data/depth_kiel_bay.npz                 EMODnet Bathymetry DTM for the routing box
   data/restricted_zones_kiel_bay.geojson  restricted / military zones from OpenStreetMap
+  data/wind_farms_kiel_bay.geojson        offshore wind farm areas and turbines from OpenStreetMap
 
 Sources (only the routing box and the tag names are sent, no personal data):
   - Depth: EMODnet Bathymetry, coverage emodnet__mean, via its WCS as plain text
@@ -19,8 +20,18 @@ Sources (only the routing box and the tag names are sent, no personal data):
       exercise    - military exercise areas WITHOUT an entry restriction (e.g. Walkyrien,
                     600 km2 of the outer bay): passage allowed, kept only for the map
     Zones that only restrict fishing, anchoring or similar (non-military) are not kept.
+  - Wind farms: OpenStreetMap via Overpass (ODbL), category "wind_farm":
+      areas    - power=plant + plant:source=wind, or seamark:production_area:category=wind_farm;
+                 kept only if at least half of the area is at sea (onshore farms don't matter)
+      turbines - power=generator + generator:source=wind, or seamark:landmark:category=windmotor;
+                 kept only if in water (land polygons AND depth model). Stored as points; the
+                 safety radius (default 500 m) is a routing setting. Each turbine gets the name of
+                 the wind farm area it stands in (or within 1 km of), else of the wind farm
+                 relation it belongs to, else "wind turbine". Near-shore turbines standing in
+                 shallow water (e.g. Kappel on Lolland) are kept: they are in the water.
+    Needs data/land_kiel_bay.geojson and the depth file (for the at-sea check).
 
-Usage:  python download_routing_data.py [--depth-only | --zones-only]
+Usage:  python download_routing_data.py [--depth-only | --zones-only | --wind-only]
 """
 import argparse
 import json
@@ -32,7 +43,7 @@ from datetime import datetime, timezone
 from pathlib import Path
 
 import numpy as np
-from shapely.geometry import LineString, Polygon, mapping
+from shapely.geometry import LineString, Point, Polygon, mapping
 from shapely.ops import polygonize, unary_union
 
 import routing
@@ -40,6 +51,7 @@ import routing
 DATA = Path(__file__).resolve().parent / "data"
 DEPTH_FILE = DATA / "depth_kiel_bay.npz"
 ZONES_FILE = DATA / "restricted_zones_kiel_bay.geojson"
+WIND_FILE = DATA / routing.WIND_FILE
 USER_AGENT = "marine-weather-agent (learning project)"
 
 WCS_URL = "https://ows.emodnet-bathymetry.eu/wcs"
@@ -151,22 +163,24 @@ def element_polygon(element: dict):
     return unary_union(polygons).buffer(0) if polygons else None
 
 
-def download_zones():
-    lon0, lat0, lon1, lat1 = routing.ROUTE_BBOX
-    box = f"{lat0},{lon0},{lat1},{lon1}"
-    query = f"""[out:json][timeout:90];
-(way["seamark:type"="restricted_area"]({box});relation["seamark:type"="restricted_area"]({box});
- way["military"~"^(danger_area|range)$"]({box});relation["military"~"^(danger_area|range)$"]({box}););
-out geom;"""
+def overpass(query: str) -> dict:
     for attempt in range(4):                       # Overpass is often busy (429 / 502 / 504)
         try:
-            answer = json.loads(_get(OVERPASS_URL, data=urllib.parse.urlencode({"data": query}).encode()))
-            break
+            return json.loads(_get(OVERPASS_URL, data=urllib.parse.urlencode({"data": query}).encode()))
         except OSError as exc:
             if attempt == 3:
                 raise
             print(f"  Overpass busy ({exc}), retrying in {15 * (attempt + 1)} s")
             time.sleep(15 * (attempt + 1))
+
+
+def download_zones():
+    lon0, lat0, lon1, lat1 = routing.ROUTE_BBOX
+    box = f"{lat0},{lon0},{lat1},{lon1}"
+    answer = overpass(f"""[out:json][timeout:90];
+(way["seamark:type"="restricted_area"]({box});relation["seamark:type"="restricted_area"]({box});
+ way["military"~"^(danger_area|range)$"]({box});relation["military"~"^(danger_area|range)$"]({box}););
+out geom;""")
     features, counts, skipped = [], {}, 0
     for element in answer["elements"]:
         tags = element.get("tags", {})
@@ -191,16 +205,99 @@ out geom;"""
     print(f"Wrote {ZONES_FILE.name}: {counts} (ignored {skipped} fishing/anchoring-only or open areas)")
 
 
+# ---------------------------------------------------------------------------
+# Wind farms (OpenStreetMap via Overpass)
+# ---------------------------------------------------------------------------
+
+def download_wind_farms():
+    import shapely
+    import tools
+    lon0, lat0, lon1, lat1 = routing.ROUTE_BBOX
+    box = f"{lat0},{lon0},{lat1},{lon1}"
+    answer = overpass(f"""[out:json][timeout:120];
+(way["power"="plant"]["plant:source"="wind"]({box});relation["power"="plant"]["plant:source"="wind"]({box});
+ way["seamark:production_area:category"="wind_farm"]({box});
+ relation["seamark:production_area:category"="wind_farm"]({box});
+ node["power"="generator"]["generator:source"="wind"]({box});
+ node["seamark:landmark:category"="windmotor"]({box}););
+out geom;""")
+    land = tools._land_km()                         # local km grid, like the routing
+    shapely.prepare(land)
+    depth = routing.load_depth()
+    km = lambda lon, lat: tools._to_km(lon, lat)
+
+    # Turbines that are members of a wind farm relation get that farm's name.
+    member_of = {m["ref"]: e["tags"]["name"] for e in answer["elements"]
+                 if e["type"] == "relation" and e.get("tags", {}).get("name")
+                 for m in e.get("members", []) if m.get("type") == "node"}
+    areas, turbines, seen, onshore = [], [], set(), {"areas": 0, "turbines": 0}
+    for e in answer["elements"]:
+        key = f"{e['type']}/{e['id']}"
+        if key in seen:
+            continue
+        seen.add(key)
+        tags = e.get("tags", {})
+        if e["type"] == "node":
+            x, y = km(e["lon"], e["lat"])
+            if shapely.contains_xy(land, x, y) or float(depth.at(x, y)) <= 0:
+                onshore["turbines"] += 1
+                continue
+            turbines.append((e, Point(x, y)))
+            continue
+        polygon = element_polygon(e)
+        if polygon is None or polygon.is_empty:           # e.g. a relation of turbine nodes only
+            onshore["areas"] += 1
+            continue
+        polygon_km = shapely.transform(polygon, lambda xy: xy * [tools._KM_PER_DEG_LON, tools._KM_PER_DEG_LAT])
+        at_sea = polygon_km.difference(land).area / polygon_km.area if polygon_km.area else 0
+        if at_sea < 0.5:
+            onshore["areas"] += 1
+            continue
+        areas.append((tags.get("name") or tags.get("seamark:name") or "wind farm", polygon, polygon_km, key))
+
+    # The same farm is often mapped twice (a way AND a relation): keep the larger one per name.
+    by_name = {}
+    for a in areas:
+        if a[0] not in by_name or a[2].area > by_name[a[0]][2].area:
+            by_name[a[0]] = a
+    areas = list(by_name.values())
+
+    features = [{"type": "Feature", "geometry": mapping(poly), "properties": {
+        "name": name, "category": "wind_farm", "kind": "area", "restriction": None, "osm": key}}
+        for name, poly, _, key in areas]
+    for e, p in turbines:
+        near = min(((a[2].distance(p), a[0]) for a in areas), default=(None, None))
+        name = (near[1] if near[0] is not None and near[0] <= 1.0
+                else member_of.get(e["id"]) or e.get("tags", {}).get("name") or "wind turbine")
+        features.append({"type": "Feature", "geometry": {"type": "Point", "coordinates": [e["lon"], e["lat"]]},
+                         "properties": {"name": name, "category": "wind_farm", "kind": "turbine",
+                                        "restriction": None, "osm": f"node/{e['id']}"}})
+    WIND_FILE.write_text(json.dumps({
+        "type": "FeatureCollection",
+        "properties": {"source": f"OpenStreetMap via {OVERPASS_URL}",
+                       "licence": "ODbL, (c) OpenStreetMap contributors",
+                       "fetched": datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ"),
+                       "bbox": routing.ROUTE_BBOX},
+        "features": features}, ensure_ascii=False), encoding="utf-8")
+    print(f"Wrote {WIND_FILE.name}: {len(areas)} offshore wind farm area(s) "
+          f"({', '.join(sorted(by_name))}), {len(turbines)} offshore turbine(s); "
+          f"ignored: {onshore['areas']} areas onshore or without an outline, {onshore['turbines']} turbines on land")
+
+
 def main():
     parser = argparse.ArgumentParser(description=__doc__.splitlines()[0])
     parser.add_argument("--depth-only", action="store_true")
     parser.add_argument("--zones-only", action="store_true")
+    parser.add_argument("--wind-only", action="store_true")
     args = parser.parse_args()
     DATA.mkdir(exist_ok=True)
-    if not args.zones_only:
+    only = args.depth_only or args.zones_only or args.wind_only
+    if args.depth_only or not only:
         download_depth()
-    if not args.depth_only:
+    if args.zones_only or not only:
         download_zones()
+    if args.wind_only or not only:
+        download_wind_farms()
 
 
 if __name__ == "__main__":

@@ -16,7 +16,7 @@ from shapely.ops import unary_union
 TAG = "v5.1.2"
 BASE_URL = f"https://raw.githubusercontent.com/nvkelso/natural-earth-vector/{TAG}/geojson"
 LAYERS = ["ne_10m_land", "ne_10m_minor_islands"]
-BBOX = (9.0, 53.8, 12.0, 55.6)        # lon_min, lat_min, lon_max, lat_max (Kiel Bay + margin)
+BBOX = (9.0, 53.8, 13.3, 55.8)        # lon_min, lat_min, lon_max, lat_max (routing area + margin)
 OUT = Path(__file__).resolve().parent / "data" / "land_kiel_bay.geojson"
 
 

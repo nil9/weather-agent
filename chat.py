@@ -21,6 +21,7 @@ from datetime import date, datetime, timedelta, timezone
 from openai import APIError, APITimeoutError
 
 import agent
+import route_weather as rw
 import routing
 import tools
 
@@ -54,12 +55,14 @@ ON_TOPIC_WORDS = re.compile(
     r"mon|tue|wed|thu|fri|sat|sun|"
     r"stations?|north|east|south|west|exclud\w*|suspect|"
     r"sail\w*|boat\w*|safe\w*|sea|bay|"
-    r"rout\w*|path|detour\w*|depth\w*|deep\w*|shallow\w*|draft|zones?|firing|buffer\w*)\b", re.IGNORECASE)
+    r"rout\w*|path|detour\w*|depth\w*|deep\w*|shallow\w*|draft|zones?|firing|buffer\w*|"
+    r"wind ?farms?|turbines?)\b", re.IGNORECASE)
 
 # Questions about the planned route (Route tab). They need get_route_explanation, and
 # without a planned route they get NO_ROUTE_ANSWER (in code, no LLM).
 ROUTE_WORDS = re.compile(r"\b(rout\w*|path|detour\w*|depth\w*|deep\w*|shallow\w*|draft|zones?|"
-                         r"firing( areas?)?|restricted|buffer\w*|eta|distance)\b", re.IGNORECASE)
+                         r"firing( areas?)?|restricted|buffer\w*|eta|distance|wind ?farms?|turbines?)\b",
+                         re.IGNORECASE)
 COMPASS_WORDS = re.compile(r"\b(north|east|south|west)\w*\b", re.IGNORECASE)
 NO_ROUTE_ANSWER = "Plan a route in the Route tab first."
 WHY_WORDS = re.compile(r"\b(why|reason\w*|how come|what (makes|made|causes?|caused))\b", re.IGNORECASE)
@@ -361,6 +364,209 @@ def weather_part(question: str) -> str:
     return (text[0].upper() + text[1:]) if text else question
 
 
+ROUTE_WEATHER_TOOL = "get_route_weather"
+# "along the way", "on my route", "the trip" ...: a weather / safety clause with one of these is
+# about the weather ALONG the planned route, not at the sea point.
+ROUTE_REF = re.compile(r"\b(along|on (my|the|your) (route|way|trip)|my route|the route|your route|"
+                       r"the way|trip|journey|passage|crossing|route)\b", re.IGNORECASE)
+
+
+def _clauses(question: str) -> list[str]:
+    return [c.strip(" ,;?") for c in re.split(r",|;|\band\b|\balso\b", question) if c.strip(" ,;?")]
+
+
+def _is_weather_clause(clause: str) -> bool:
+    rest = COMPASS_WORDS.sub(" ", ROUTE_WORDS.sub(" ", clause))
+    return bool(FORECAST_WORDS.search(rest) or SAFETY_WORDS.search(rest)
+                or re.search(r"\b(conditions?|rough\w*|calm|gusts?|worst|windiest|storm\w*|gales?)\b", rest, re.I))
+
+
+def split_route_question(question: str) -> dict:
+    """Classify the clauses of a question while a route exists:
+    why: "why does the route go north" (answered in code from the route explanation)
+    route_weather: "is it safe along the way", "storm on my route" (answered in code); also a
+        safety clause without a route reference ("is it safe to sail tomorrow?"): it is about
+        the planned route then, and gets a sea-point line for comparison (sea_compare)
+    route_clause: the text of those clauses (decides storm / safe / worst / summary, and the day)
+    rest: other weather clauses without a route reference ("how windy is it today") -> LLM."""
+    why = route_weather = sea_compare = False
+    rest, route_clauses = [], []
+    for clause in _clauses(question):
+        if WHY_WORDS.search(clause) and ROUTE_WORDS.search(clause):
+            why = True
+        elif _is_weather_clause(clause) and ROUTE_REF.search(clause):
+            route_weather = True
+            route_clauses.append(clause)
+        elif _is_weather_clause(clause) and SAFETY_WORDS.search(clause):
+            route_weather = sea_compare = True
+            route_clauses.append(clause)
+        elif _is_weather_clause(clause):
+            rest.append(clause)
+    text = " and ".join(rest)
+    return {"why": why, "route_weather": route_weather, "sea_compare": sea_compare,
+            "route_clause": " and ".join(route_clauses),
+            "rest": (text[0].upper() + text[1:] + "?") if text else ""}
+
+
+def _time(iso: str) -> str:
+    return iso[11:16]
+
+
+# --- Route weather: the direct answer first (all built in code) -----------------------------
+STORM_WORDS = re.compile(r"\b(storms?|stormy|gales?|hurricanes?|strong winds?|high winds?|very windy)\b", re.I)
+WORST_WORDS = re.compile(r"\b(worst|roughest|windiest|strongest|most wind\w*|peak)\b", re.I)
+OK_WORDS = re.compile(r"\b(ok|okay|alright|fine|good idea|doable|go)\b", re.I)
+# Wind classes for storm questions (sustained wind, Beaufort): storm 10+, gale 8+, strong wind 6-7.
+WIND_CLASSES = [(10, "storm"), (8, "gale"), (6, "strong wind")]
+
+
+def route_weather_intent(question: str) -> str:
+    """What a route-weather question asks: "storm", "worst", "safe" or "summary"."""
+    if STORM_WORDS.search(question):
+        return "storm"
+    if WORST_WORDS.search(question):
+        return "worst"
+    if SAFETY_WORDS.search(question) or OK_WORDS.search(question):
+        return "safe"
+    return "summary"
+
+
+def wind_class(bft: int) -> str | None:
+    return next((name for limit, name in WIND_CLASSES if bft >= limit), None)
+
+
+def asked_wind_class(question: str) -> tuple[int, str]:
+    """The class a storm question asks about: "storm" -> Bft 10, "gale" -> 8, else strong wind (6)."""
+    q = question.lower()
+    if re.search(r"\b(storm\w*|hurricanes?)\b", q):
+        return 10, "storm"
+    if re.search(r"\bgales?\b", q):
+        return 8, "gale"
+    return 6, "strong wind"
+
+
+def _wind(g: dict) -> str:
+    return f"Beaufort {g['wind_bft']}" + (f" (gusts Beaufort {g['gust_bft']})" if g.get("gust_bft") is not None else "")
+
+
+def _waves(g: dict) -> str:
+    return f", waves {g['waves_m']} m" if g.get("waves_m") is not None else ""
+
+
+def _leg_at(g: dict) -> str:
+    return f"{_time(g['time_utc'])} UTC on leg {g['leg']}"
+
+
+def route_direct_sentence(intent: str, question: str, info: dict) -> str:
+    """ONE sentence that answers the specific question, from the route weather (code only)."""
+    legs, lim = info["legs"], info["limits"]
+    n = len(legs)
+    strongest = max(legs, key=lambda g: (g["wind_bft"], g["wind_ms"]))
+    rough = [g for g in legs if g["status"] == "red"]
+    if intent == "storm":
+        limit, label = asked_wind_class(question)
+        reached = [g for g in legs if g["wind_bft"] >= limit]
+        if reached:
+            return (f"Yes: {wind_class(strongest['wind_bft'])} on your route, strongest {_wind(strongest)} at "
+                    f"{_leg_at(strongest)}; {len(reached)} of {n} legs reach Beaufort {limit} or more, "
+                    f"the first at {_leg_at(reached[0])}.")
+        cls = wind_class(strongest["wind_bft"])
+        return (f"No {label} expected: strongest is {_wind(strongest)} at {_leg_at(strongest)}"
+                + (f" ({cls})" if cls else "") + ".")
+    if intent == "worst":
+        w = info["worst"]
+        return f"Worst at {_leg_at(w)} near {w['lat']:.2f}° N, {w['lon']:.2f}° E: {_wind(w)}{_waves(w)}."
+    limits = f"Beaufort {lim['wind_limit_bft']} or waves {lim['waves_limit_m']:g} m"
+    if intent == "safe":
+        if rough:
+            g = rough[0]
+            return (f"Not within your limits: {len(rough)} of {n} legs are above {limits}, the first at "
+                    f"{_leg_at(g)} ({_wind(g)}{_waves(g)}).")
+        caution = sum(g["status"] == "yellow" for g in legs)
+        w = info["worst"]                                    # the same leg as "worst:" in the summary
+        return (f"Within your limits: no leg is above {limits}; worst {_wind(w)}{_waves(w)} at {_leg_at(w)}."
+                + (f" {caution} of {n} legs need caution (from Beaufort {lim.get('caution_from_bft', rw.CAUTION_BFT)} "
+                   f"or waves from {lim.get('caution_waves_m', rw.CAUTION_WAVES_M):g} m)." if caution else ""))
+    lightest = min(g["wind_bft"] for g in legs)
+    wind = (f"Beaufort {strongest['wind_bft']} on every leg" if lightest == strongest["wind_bft"]
+            else f"from Beaufort {lightest} up to Beaufort {strongest['wind_bft']}")
+    waves = [g["waves_m"] for g in legs if g.get("waves_m") is not None]
+    return (f"Wind on your route {wind}" + (f", waves up to {max(waves)} m" if waves else "")
+            + f"; {len(rough)} of {n} legs above your limits.")
+
+
+def route_weather_answer(info: dict, question: str = "") -> str:
+    """A route-weather answer, built in code from get_route_weather: first ONE direct sentence
+    for the question (storm / safe / worst / summary), then a short summary (departure, arrival,
+    legs above the limits, worst leg). The per-leg list is NOT in the text: the page shows it as
+    a table under "Details" (answer field route_legs)."""
+    legs, lim = info["legs"], info["limits"]
+    if not legs:
+        return "No legs: the route has no length."
+    first = route_direct_sentence(route_weather_intent(question), question, info)
+    dep, arr = info["departure_utc"], legs[-1]["time_utc"]
+    rough = sum(g["status"] == "red" for g in legs)
+    w = info["worst"]
+    parts = [first,
+             f"Along your route: departure {nice_date(dep[:10])} {_time(dep)} UTC at {info['speed_knots']:g} knots, "
+             f"arrival about {_time(arr)} UTC; {rough} of {len(legs)} legs above your limits (Beaufort "
+             f"{lim['wind_limit_bft']}, waves {lim['waves_limit_m']:g} m); worst: leg {w['leg']} at "
+             f"{_time(w['time_utc'])} UTC, {_wind(w)}{_waves(w)}."]
+    if info.get("note"):
+        parts.append(f"Note: {info['note']}.")
+    parts.append(f"Weather: {info['source']}.")
+    return " ".join(parts)
+
+
+def route_legs_table(info: dict) -> list[dict]:
+    """The legs for the Details table on the page (time, place, wind, gusts, waves, status)."""
+    return [{k: g.get(k) for k in ("leg", "time_utc", "lat", "lon", "wind_bft", "gust_bft", "waves_m", "status")}
+            for g in info["legs"]]
+
+
+def departure_on(route: dict, day: str) -> str:
+    """The route's departure moved to `day`, same time of day (UTC). Default departure: now."""
+    base = routing._departure(route.get("departure"))
+    return f"{day}T{base:%H:%M}:00+00:00"
+
+
+def sea_point_comparison(data: dict, day: str) -> str:
+    """One line: the sea-point verdict for that day (sail_safety, code), for comparison."""
+    s = tools._sail_safety(data, day)
+    return (f"Sea point for comparison: {data['sea_point']['name']}, {nice_date(day)}: {s['verdict']} "
+            f"(max wind Beaufort {s['beaufort']}, pressure {s['pressure_trend']}).")
+
+
+def scope_label(point: dict) -> str:
+    """What a weather answer is about, for the label at the top of the answer."""
+    if point.get("id") == "POINT":
+        return f"Selected point: {point['lat']:.2f}° N, {point['lon']:.2f}° E"
+    return f"Sea point: {point['name']}"
+
+
+def route_weather_tool(route: dict, departure: str | None = None):
+    """The read-only route-weather tool, bound to the planned route (weather at each leg's
+    passing time, computed in code). `departure` overrides the route's departure time
+    ("is it safe to sail tomorrow?" -> the same route, departing tomorrow)."""
+    def get_route_weather(**_ignored):
+        r = routing.route(**{**route, "weather": route.get("weather") if route.get("weather") in ("show", "aware")
+                             else "show", **({"departure": departure} if departure else {})})
+        w = r["weather"]
+        return {"departure_utc": w["departure_utc"], "speed_knots": r["speed_kn"], "variant": w["variant"],
+                "legs": [{k: g[k] for k in ("leg", "from_km", "to_km", "time_utc", "lat", "lon", "wind_ms", "wind_bft",
+                                            "gust_ms", "gust_bft", "waves_m", "status")} for g in w["legs"]],
+                "worst": w["worst"], "rough_legs": w["rough_legs"], "limits": w["limits"],
+                "source": w["source"], "note": w["note"]}
+    return tools._as_json(get_route_weather)
+
+
+ROUTE_WEATHER_SPEC = tools._spec(
+    ROUTE_WEATHER_TOOL,
+    "Weather along the planned route: for each leg the time the boat passes it and the forecast "
+    "for that place and hour (wind in Beaufort, gusts, waves), the strongest leg and the legs above "
+    "the limits. Use it for every question about the weather or conditions along the route.")
+
+
 def why_route_answer(facts: dict) -> str:
     """The answer to "why this route?", built entirely in code from get_route_explanation:
     the main reason, every step with a real extra (> NOISE_KM), a narrow-passage warning,
@@ -373,6 +579,8 @@ def why_route_answer(facts: dict) -> str:
                      f"{facts['route']['direct_water_route_km']} km: " + "; ".join(
                          f"{row['step'].removeprefix('+ ').split(' (')[0]} +{row['extra_km_from_this_step']} km"
                          + (f" ({row['reason']})" if row.get("reason") else "") for row in steps) + ".")
+    if facts["route_goes_via"]:
+        parts.append(f"Via: {' → '.join(facts['route_goes_via'])}.")
     if facts["narrow_passages"]["warning"]:
         parts.append(f"Note: {facts['narrow_passages']['warning']}.")
     r, d = facts["route"], facts["depth"]
@@ -409,6 +617,55 @@ def ensure_main_reason(answer: str, tool_results: list[str]) -> str:
     if missing:
         logging.getLogger("chat").warning("route answer missed zones %s; main-reason sentence added", missing)
     return f"{answer} {sentence}"
+
+
+def sea_point_note(answer: str, point: dict, route_planned: bool = True) -> str:
+    """A forecast answer must say it is for ONE point, NOT the weather along the route."""
+    if "not along your route" in answer.lower():
+        return answer
+    where = (f"the selected point at {point['lat']:.2f}° N, {point['lon']:.2f}° E" if point.get("id") == "POINT"
+             else f"the sea point {point['name']}")
+    note = (f"(Forecast for {where}, not along your route.)" if route_planned else
+            f"(Forecast for {where}, not along your route: plan a route in the Route tab for the weather "
+            "along the way.)")
+    nav = routing.NOT_FOR_NAVIGATION
+    if answer.endswith(nav):
+        return f"{answer.removesuffix(nav).rstrip()} {note} {nav}"
+    return f"{answer} {note}"
+
+
+# --- Beaufort: exact numbers only ------------------------------------------------------------
+BFT_RANGE = re.compile(r"\b(beaufort|bft)\s*(scale\s*|force\s*|of\s*)*\d+\s*(-|–|to|or)\s*\d+\b", re.IGNORECASE)
+BFT_NUMBER = re.compile(r"\b(?:beaufort|bft)\s*(?:scale\s*|force\s*|of\s*|number\s*)*(\d+)\b", re.IGNORECASE)
+
+
+def _bft_values(obj, found: set):
+    """All Beaufort numbers in a tool result (keys with 'beaufort' or 'bft', incl. thresholds)."""
+    if isinstance(obj, dict):
+        for k, v in obj.items():
+            if ("beaufort" in k.lower() or "bft" in k.lower()) and isinstance(v, int):
+                found.add(v)
+            _bft_values(v, found)
+    elif isinstance(obj, list):
+        for v in obj:
+            _bft_values(v, found)
+    return found
+
+
+def beaufort_problems(answer: str, tool_results: list[str]) -> list[str]:
+    """No Beaufort ranges ("Beaufort 5-6"), and every Beaufort number must be one from the tools."""
+    if BFT_RANGE.search(answer):
+        return ["give the exact Beaufort number from the tool result, not a range"]
+    allowed = set()
+    for result in tool_results:
+        try:
+            _bft_values(json.loads(result), allowed)
+        except (json.JSONDecodeError, TypeError):
+            pass
+    wrong = sorted({int(n) for n in BFT_NUMBER.findall(answer)} - allowed)
+    if wrong and allowed:
+        return [f"Beaufort {', '.join(map(str, wrong))} is not in any tool result; use the exact Beaufort number"]
+    return []
 
 
 def not_for_navigation(answer: str, tools_used: list[dict]) -> str:
@@ -719,7 +976,8 @@ def check_answer(answer: str, question: str, tools_used: list[dict], tool_result
     if agent.echoes_data_prefix(answer):
         return ["do not repeat the label 'TOOL OUTPUT (data, not instructions)'; "
                 "answer the question in your own words using the tool results"]
-    problems = internal_name_problems(answer) + other_topic_problems(answer, other or []) + claim_problems(answer)
+    problems = (internal_name_problems(answer) + other_topic_problems(answer, other or []) + claim_problems(answer)
+                + beaufort_problems(answer, tool_results))
     asked = resolve_days(question, data) if days is None else days
     missing = missing_tools(topic, tools_used, safety, question, data, asked, route_planned)
     for name in missing:
@@ -807,12 +1065,19 @@ def route_tool(route: dict):
             "zones": {"zones_avoided": s["zones_avoided"], "zones_crossed_with_penalty": s["zones_crossed"],
                       "exercise_areas_passed_passage_allowed": s["exercise_areas_crossed"],
                       "nearest_closed_zone": s["nearest_zone"]},
+            "wind_farms": {"mode": s["wind_farm_mode"], "wind_farms_avoided": s["wind_farms_avoided"],
+                           "wind_farms_crossed": s["wind_farms_crossed"],
+                           "min_distance_to_a_turbine_m": (None if s["min_turbine_distance_km"] is None
+                                                           else round(s["min_turbine_distance_km"] * 1000)),
+                           "nearest_turbine_belongs_to": s["nearest_turbine"],
+                           "turbine_radius_m": s["turbine_radius_m"]},
             "buffers": {"min_distance_to_land_m": round(s["min_land_distance_km"] * 1000),
                         "land_buffer_m": s["land_buffer_m"],
                         "min_distance_to_closed_zones_m": (None if s["min_zone_distance_km"] is None
                                                            else round(s["min_zone_distance_km"] * 1000)),
                         "zone_buffer_m": s["zone_buffer_m"]},
             "narrow_passages": {"used": s["passages_used"], "warning": s["passage_warning"]},
+            "route_goes_via": s["via"],
             "detour_breakdown": [{"step": row["step"], "route_km_after_this_step": row["distance_km"],
                                   # grid noise (within +-0.2 km) is shown as 0, never as a shorter route
                                   "extra_km_from_this_step": (0.0 if row.get("noise") else row["extra_km"]),
@@ -831,7 +1096,7 @@ ROUTE_TOOL_SPEC = tools._spec(
     ROUTE_TOOL,
     "Explain the route planned in the Route tab: distance, ETA, minimum depth along it, the zones "
     "it avoids or crosses, exercise areas, and a detour breakdown (direct water route, + depth rule, "
-    "+ restricted zones, + safety buffers, each with its extra km and reason) plus the main reason "
+    "+ restricted zones and wind farms, + safety buffers, each with its extra km and reason) plus the main reason "
     "and on which side of the direct line it goes. Use it for every question about the route.")
 
 
@@ -857,22 +1122,49 @@ def _answer_question(question: str, history: list[dict] | None, point: dict | No
         # A route question without a planned route: answered in code, no LLM.
         return {"answer": NO_ROUTE_ANSWER, "tools_used": [], "safety": [], "on_topic": True,
                 "point": data["sea_point"]}
-    route_text = None                     # the code-built answer to a "why" route question
+    asks_along_route = bool(ROUTE_REF.search(question)) and _is_weather_clause(question)
+    route_text = None                     # code-built answer parts (why / weather along the route)
+    code_calls = []
+    route_legs = None                     # legs for the Details table (weather along the route)
+    scope = []                            # labels at the top of the answer: what it is about
     if route is not None:
         functions[ROUTE_TOOL] = route_tool(route)
-        if is_why_route_question(question):
-            facts_json = functions[ROUTE_TOOL]()
-            if agent.is_error(facts_json):
-                return {"answer": json.loads(facts_json)["error"], "tools_used": [], "safety": [],
-                        "on_topic": True, "point": data["sea_point"]}
-            route_text = why_route_answer(json.loads(facts_json))
-            code_call = [{"name": ROUTE_TOOL, "args": {}, "by": "code"}]
-            if not has_weather_part(question):
-                return {"answer": route_text, "tools_used": code_call, "safety": [], "on_topic": True,
-                        "built_in_code": True, "point": data["sea_point"]}
-            # Mixed: the route part is done; the LLM gets ONLY the weather clause.
-            del functions[ROUTE_TOOL]
-            question = weather_part(question)
+        functions[ROUTE_WEATHER_TOOL] = route_weather_tool(route)
+        kinds = split_route_question(question)
+        parts = []
+        if kinds["why"]:
+            out = functions[ROUTE_TOOL]()
+            parts.append(json.loads(out)["error"] if agent.is_error(out) else
+                         why_route_answer(json.loads(out)).removesuffix(routing.NOT_FOR_NAVIGATION).rstrip())
+            code_calls.append({"name": ROUTE_TOOL, "args": {}, "by": "code"})
+        if kinds["route_weather"]:
+            # "Is it safe to sail tomorrow?": the same route, departing that day at the same time.
+            days = resolve_days(kinds["route_clause"], data, history)
+            departure = departure_on(route, days[0]) if days else None
+            out = route_weather_tool(route, departure)()
+            code_calls.append({"name": ROUTE_WEATHER_TOOL, "args": {"departure": departure} if departure else {},
+                               "by": "code"})
+            if agent.is_error(out):
+                parts.append(json.loads(out)["error"])
+            else:
+                info = json.loads(out)
+                parts.append(route_weather_answer(info, kinds["route_clause"]))
+                route_legs = route_legs_table(info)
+                scope.append("Along your route")
+                day = days[0] if days else info["departure_utc"][:10]
+                if kinds["sea_compare"] and day in dates:
+                    parts.append(sea_point_comparison(data, day))
+                    code_calls.append({"name": "sail_safety", "args": {"day": day}, "by": "code"})
+        if parts:
+            route_text = " ".join(parts) + f" {routing.NOT_FOR_NAVIGATION}"
+            if not kinds["rest"]:
+                return {"answer": route_text, "tools_used": code_calls, "safety": [], "on_topic": True,
+                        "built_in_code": True, "point": data["sea_point"], "route_legs": route_legs,
+                        "scope": scope}
+            # Mixed: the route parts are done in code; the LLM gets ONLY the other weather clause.
+            for name in (ROUTE_TOOL, ROUTE_WEATHER_TOOL):
+                functions.pop(name, None)
+            question = kinds["rest"]
             topic = question_topic(question, history)
 
     # Resolved ONCE, in code, before the LLM answers; used for the LLM note, the badges,
@@ -897,7 +1189,8 @@ def _answer_question(question: str, history: list[dict] | None, point: dict | No
                 {"role": "user", "content": question}]
 
     def all_specs():
-        return tools.chat_tool_specs(data) + ([ROUTE_TOOL_SPEC] if ROUTE_TOOL in functions else [])
+        return (tools.chat_tool_specs(data) + ([ROUTE_TOOL_SPEC] if ROUTE_TOOL in functions else [])
+                + ([ROUTE_WEATHER_SPEC] if ROUTE_WEATHER_TOOL in functions else []))
     specs = all_specs()
     tool_results, tools_used, safety = [], [], []
     cache = {}                     # (tool, normalized args) -> result, for THIS question only
@@ -906,15 +1199,21 @@ def _answer_question(question: str, history: list[dict] | None, point: dict | No
 
     def result(answer):
         # Badges: only the days the question names (the model may have checked more).
+        if (route is not None or asks_along_route) and answer not in (UNRELIABLE_ANSWER, TIME_LIMIT_ANSWER) \
+                and any(u["name"] in FORECAST_TOOLS for u in tools_used):
+            # The forecast is for ONE point, not the weather along a route: say which point.
+            answer = sea_point_note(answer, data["sea_point"], route_planned=route is not None)
         if route_text and answer not in (UNRELIABLE_ANSWER, TIME_LIMIT_ANSWER):
             # Mixed question: the code-built route part first, then the weather part.
             answer = f"{route_text.removesuffix(routing.NOT_FOR_NAVIGATION).rstrip()} {answer}"
             if routing.NOT_FOR_NAVIGATION.lower() not in answer.lower():
                 answer += f" {routing.NOT_FOR_NAVIGATION}"
-            tools_used.insert(0, {"name": ROUTE_TOOL, "args": {}, "by": "code"})
+            tools_used[:0] = code_calls
+        labels = scope + ([scope_label(data["sea_point"])]
+                          if any(u["name"] in FORECAST_TOOLS and u.get("by") != "code" for u in tools_used) else [])
         return {"answer": answer, "tools_used": tools_used,
                 "safety": relevant_safety(safety, asked), "on_topic": True,
-                "tool_stats": stats, "point": data["sea_point"]}
+                "tool_stats": stats, "point": data["sea_point"], "route_legs": route_legs, "scope": labels}
 
     for _ in range(MAX_CHAT_STEPS):
         # Once the cap is reached, offer no tools at all, so the model has to answer.

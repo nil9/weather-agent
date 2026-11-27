@@ -111,8 +111,17 @@ route ("Why does the route go north?").
 waves; real data: Open-Meteo Forecast + Marine, one batched request per API; dummy data: wind only),
 coloured green / yellow / red ("too rough" above Bft 6 or 1.5 m waves, adjustable). The
 "weather-aware" variant avoids rough legs where possible and is compared with the shortest route.
-In the Ask tab, "Is it safe along the way?" answers per leg with times. Code only, no LLM. Firing areas count as always active, and
-there is no traffic or weather yet, so it is not for navigation.
+In the Ask tab, questions about the weather along the route are answered in code (no LLM). The first
+sentence answers the question itself: "Will there be a storm along the way?" → "No storm expected:
+strongest is Beaufort 5 (gusts Beaufort 6) at 15:39 UTC on leg 3." (storm = Beaufort 10+, gale = 8+,
+strong wind = 6–7); "Is this route safe?" → "Within your limits …" / "Not within your limits …"
+(against the limits set in the Route tab); "When is it worst?" → time and place of the worst leg. Then
+one summary line (departure, arrival, legs above the limits, worst leg). The leg list is a table
+under "Details". Each weather answer has a label on top: "Along your route" or "Sea point: Kiel Bay
+(open water)", and the "Answering for:" line names the planned route ("Your route: Heiligenhafen →
+Faxe Bugt"). With a route, "Is it safe to sail tomorrow?" is answered for the route departing
+tomorrow at the same time of day, plus one line "Sea point for comparison: …". Firing areas count
+as always active, and there is no traffic data, so it is not for navigation.
 
 The **Ask** tab is a chat about this forecast, e.g. "Is it safe to sail tomorrow?" or "Why is EAST
 excluded?". The LLM only has read-only tools. Whether sailing is safe / caution / not safe is

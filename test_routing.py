@@ -164,7 +164,8 @@ names = {z.name for z in firing}
 check("firing areas Todendorf and Putlos are in the zone file",
       {"Schießgebiet Todendorf", "Schießgebiet Putlos"} <= names, names)
 check("exercise areas are ignored by default", routing.zone_rules()["exercise"] == "ignore")
-blocked_zones = [z for z in zones if routing.zone_rules()[z.category] == "block"]
+blocked_zones = [z for z in zones if routing.zone_rules()[z.category] == "block" and z.kind == "area"]
+turbines = [z for z in zones if z.kind == "turbine"]          # points; their radius is checked separately
 
 
 def samples_min_depth(result, step_km=0.025):
@@ -203,6 +204,7 @@ RULE_PAIRS = {
     "Kiel Bay -> west of Fehmarn (past the firing areas)": ((54.45, 10.45), (54.45, 10.95)),
     "west -> east of Fehmarn": ((54.50, 10.95), (54.45, 11.35)),
     "Kiel Bay -> Little Belt": (SEA_POINT, (55.05, 9.95)),
+    "Kiel Bay -> Gedser": ((54.45, 10.25), (54.53, 11.96)),
 }
 for name, (a, b) in RULE_PAIRS.items():
     started = time.time()
@@ -224,6 +226,152 @@ check(f"Eckernförde Bay -> east of Fehmarn: {r['distance_km']} km in {seconds:.
 started = time.time()
 routing.explain(54.50, 10.00, 54.45, 11.35)
 check(f"its detour breakdown (4 routes): {time.time() - started:.2f} s (< 4 s)", time.time() - started < 4)
+
+print("\n=== extended area: Fehmarnbelt, Rødsand, Gedser, Møn, Faxe Bugt (to 12.8° E, 55.3° N) ===")
+check(f"the routing area is {routing.ROUTE_BBOX}", routing.ROUTE_BBOX == (9.8, 54.15, 12.8, 55.3))
+r = routing.route(54.40, 11.00, 54.52, 11.60)                 # off Heiligenhafen -> Rødsand (south of Rødsand II)
+check(f"Heiligenhafen -> Rødsand: {r['distance_km']} km, ends east of Fehmarn (snap {r['end']['snap_km']} km)",
+      r["end"]["snap_km"] < 0.5 and max(p[1] for p in r["path"]) > 11.55 and not r["zones_crossed"])
+check(f"... no land, depth >= 3.0 m (25 m samples {samples_min_depth(r):.1f} m)",
+      not line_km(r).intersects(LAND) and samples_min_depth(r) >= 3.0)
+check(f"... through the Fehmarnsund with the Rule 9 warning ({r['passages_used']})",
+      r["passages_used"] == ["Fehmarnsund"] and "COLREG Rule 9" in (r["passage_warning"] or ""))
+check(f"... passage buffers kept: >= 100 m from closed zones (exact {exact_zone_distance(r, blocked_zones) * 1000:.0f} m), "
+      f">= 50 m from land (exact {exact_land_distance(r) * 1000:.0f} m)",
+      exact_zone_distance(r, blocked_zones) >= 0.1 and exact_land_distance(r) >= 0.05)
+alt = r["alternative"] or {}
+check(f"... the full-buffer alternative goes around Fehmarn ({alt.get('distance_km')} km)",
+      (alt.get("distance_km") or 0) > r["distance_km"] and not alt.get("passages_used"))
+started = time.time()
+r = routing.route(55.05, 9.95, 54.53, 11.96)                  # Little Belt -> Gedser: the longest route
+seconds = time.time() - started
+check(f"Little Belt -> Gedser: {r['distance_km']} km in {seconds:.2f} s (< 2 s)", seconds < 2 and not line_km(r).intersects(LAND))
+started = time.time()
+routing.explain(55.05, 9.95, 54.53, 11.96)
+check(f"its detour breakdown: {time.time() - started:.2f} s (< 4 s)", time.time() - started < 4)
+for name, point in [("east of 12.8° E", (54.60, 12.90)), ("north of 55.3° N", (55.35, 10.60))]:
+    try:
+        routing.route(*point, *SEA_POINT)
+        check(f"{name}: error", False, "no error")
+    except routing.RouteError as exc:
+        check(f"{name}: 'Outside the routing area'", "Outside the routing area" in str(exc), str(exc))
+
+print("\n=== Danish sounds and Faxe Bugt (narrow passages, no-route explanations) ===")
+started = time.time()
+r = routing.route(55.20, 12.30, 54.40, 11.00)                 # Faxe Bugt -> off Heiligenhafen
+seconds = time.time() - started
+check(f"Faxe Bugt -> Heiligenhafen: {r['distance_km']} km in {seconds:.2f} s (< 2 s), via {r['via']}",
+      seconds < 2 and "around Møn (east of Møns Klint)" in r["via"] and not line_km(r).intersects(LAND))
+check(f"... the panel names the passage it used ({r['passages_used']}, warning: {r['passage_warning'][:40]}…)",
+      r["passages_used"] == ["Fehmarnsund"] and r["via"][-1] == "Fehmarnsund" and "COLREG Rule 9" in r["passage_warning"])
+check(f"... rules kept (depth {samples_min_depth(r):.1f} m >= 3 m, land {exact_land_distance(r) * 1000:.0f} m >= 50 m, "
+      f"zones {exact_zone_distance(r, blocked_zones) * 1000:.0f} m >= 100 m: passage buffers)",
+      samples_min_depth(r) >= 3.0 and exact_land_distance(r) >= 0.05 and exact_zone_distance(r, blocked_zones) >= 0.1)
+r = routing.route(54.70, 12.30, 54.895, 12.05)                 # Baltic side -> Stubbekøbing
+check(f"through Grønsund: {r['distance_km']} km, via {r['via']}, Rule 9 warning for {r['passages_used']}",
+      "Grønsund" in r["via"] and "Grønsund" in r["passages_used"] and samples_min_depth(r) >= 3.0)
+try:
+    routing.route(55.00, 12.25, 55.20, 12.30)                  # Stege Bugt -> Faxe Bugt
+    check("Stege Bugt with 2 m draft + 1 m margin: no route", False, "a route was found")
+except routing.RouteError as exc:
+    check(f"Stege Bugt, 3 m needed: Bøgestrøm stays closed and is named ({str(exc)[:60]}…)",
+          str(exc).startswith("Start:") and "Ulvsund / Bøgestrøm: too shallow" in str(exc)
+          and "the boat needs 3 m" in str(exc), str(exc))
+r = routing.route(55.00, 12.25, 55.20, 12.30, draft_m=1.0, margin_m=0.5)
+check(f"Stege Bugt, 1.5 m needed: through Bøgestrøm ({r['distance_km']} km, via {r['via']})",
+      "Ulvsund / Bøgestrøm" in r["via"] and samples_min_depth(r) >= 1.5)
+try:
+    routing.route(54.40, 11.00, 54.765, 11.865)                 # -> Nykøbing in Guldborgsund
+    check("Guldborgsund (Nykøbing): no route", False, "a route was found")
+except routing.RouteError as exc:
+    check(f"Guldborgsund: the coastline data has no open channel, said so ({str(exc)[:50]}…)",
+          str(exc).startswith("Destination:") and "Guldborgsund: in the map data this water is enclosed by land" in str(exc),
+          str(exc))
+try:
+    routing.route(54.37, 12.455, 54.40, 11.00)                  # Bodden behind Darß / Zingst
+    check("Bodden (Darß / Zingst): no route", False, "a route was found")
+except routing.RouteError as exc:
+    check(f"Bodden: the water continues across the east edge, said so",
+          str(exc).startswith("Start: No route from here") and "no connection to the open sea" in str(exc)
+          and "east edge (12.8° E)" in str(exc) and not str(exc).endswith(".."), str(exc))
+started = time.time()
+r = routing.route(55.05, 9.95, 55.20, 12.30)                  # Little Belt -> Faxe Bugt: the longest route
+seconds = time.time() - started
+check(f"Little Belt -> Faxe Bugt: {r['distance_km']} km in {seconds:.2f} s (< 2 s)", seconds < 2)
+started = time.time()
+routing.explain(55.05, 9.95, 55.20, 12.30)
+check(f"its detour breakdown: {time.time() - started:.2f} s (< 4 s)", time.time() - started < 4)
+
+print("\n=== wind farms (OpenStreetMap): areas + offshore turbines with a safety radius ===")
+farm_areas = {z.name for z in zones if z.category == "wind_farm" and z.kind == "area"}
+check(f"wind farm areas at Rødsand are in the data ({sorted(farm_areas)})",
+      {"Rødsand II Havmøllepark", "Nysted Havmøllepark (Rødsand 1)"} <= farm_areas)
+check(f"{len(turbines)} offshore turbines as points, all in water",
+      len(turbines) >= 150 and all(z.geom_km.geom_type == "Point" and not LAND.contains(z.geom_km)
+                                   and float(depth.at(z.geom_km.x, z.geom_km.y)) > 0 for z in turbines))
+check("wind farms are blocked by default", routing.zone_rules()["wind_farm"] == "block"
+      and routing.make_rules().turbine_radius_km == 0.5)
+
+
+def turbine_distance(result):
+    """Independent check: exact distance (shapely) from the route to the nearest turbine."""
+    return min(z.geom_km.distance(line_km(result)) for z in turbines)
+
+
+A, B = (54.55, 11.40), (54.55, 11.85)                         # west of Rødsand II -> east of Nysted
+straight = LineString([tools._to_km(A[1], A[0]), tools._to_km(B[1], B[0])])
+check("the straight line runs through both Rødsand wind farms (so the test means something)",
+      sum(z.geom_km.intersects(straight) for z in zones if z.category == "wind_farm" and z.kind == "area") == 2
+      and min(z.geom_km.distance(straight) for z in turbines) < 0.2)
+started = time.time()
+r = routing.route(*A, *B)
+seconds = time.time() - started
+check(f"near Rødsand: {r['distance_km']} km in {seconds:.2f} s, no land, outside both farm areas",
+      seconds < 2 and not line_km(r).intersects(LAND) and not r["wind_farms_crossed"]
+      and not touches(r, [z for z in zones if z.category == "wind_farm" and z.kind == "area"]))
+check(f"... >= 500 m from every turbine (exact {turbine_distance(r) * 1000:.0f} m, reported "
+      f"{r['min_turbine_distance_km'] * 1000:.0f} m, nearest: {r['nearest_turbine']})",
+      turbine_distance(r) >= 0.5 and abs(turbine_distance(r) - r["min_turbine_distance_km"]) < 0.01)
+check(f"... >= 500 m from the farm areas (zone buffer, exact {exact_zone_distance(r, blocked_zones) * 1000:.0f} m)",
+      exact_zone_distance(r, blocked_zones) >= 0.5)
+check(f"... and the rules still hold (min depth {samples_min_depth(r):.1f} m, land {exact_land_distance(r) * 1000:.0f} m)",
+      samples_min_depth(r) >= 3.0 and exact_land_distance(r) >= 0.3)
+r1000 = routing.route(*A, *B, turbine_radius_m=1000)
+check(f"turbine radius 1000 m: >= 1000 m from every turbine (exact {turbine_distance(r1000) * 1000:.0f} m), "
+      f"longer ({r1000['distance_km']} vs {r['distance_km']} km)",
+      turbine_distance(r1000) >= 1.0 and r1000["distance_km"] > r["distance_km"])
+free = routing.route(*A, *B, wind_farms="penalty", penalty_factor=0)
+check(f"penalty mode, factor 0: straight through, the farms are still listed ({free['wind_farms_crossed']})",
+      free["distance_km"] < r["distance_km"] and len(free["wind_farms_crossed"]) == 2)
+pen = routing.route(*A, *B, wind_farms="penalty")
+check(f"penalty mode, factor 10: goes around (0 km inside: {pen['zone_km_inside_penalty']} km)",
+      pen["zone_km_inside_penalty"] == 0 and turbine_distance(pen) >= 0.5)
+e = routing.explain(*A, *B)
+zrow = e["detour"][2]
+check(f"breakdown: '{zrow['step']}' {zrow['extra_text']} ({zrow.get('reason')})",
+      zrow["step"].startswith("+ restricted zones and wind farms") and "Rødsand II Havmøllepark (wind farm)" in zrow.get("reason", "")
+      and set(zrow.get("wind_farms_avoided", [])) == {"Rødsand II Havmøllepark", "Nysted Havmøllepark (Rødsand 1)"})
+check(f"main reason sentence: {e['main_reason_sentence'][:90]}…",
+      e["main_reason_sentence"].startswith("Main reason: the wind farms add") and "Rødsand II" in e["main_reason_sentence"])
+pe = routing.explain(*A, *B, wind_farms="penalty")
+check(f"penalty mode: the breakdown names the farms it goes around ({pe['detour'][2].get('reason', '')[:70]}…)",
+      "penalty: going around is cheaper" in pe["detour"][2].get("reason", "")
+      and pe["main_reason_sentence"].startswith("Main reason: the wind farms add"))
+check("the breakdown lists the wind farms in the summary",
+      set(e["summary"]["wind_farms_avoided"]) == {"Rødsand II Havmøllepark", "Nysted Havmøllepark (Rødsand 1)"})
+inside = routing.route(54.555, 11.54, *B)                      # a click inside Rødsand II
+check(f"a click inside a wind farm is moved out, with the reason ({inside['snap_warnings'][0][:95]}…)",
+      "inside Rødsand II Havmøllepark (wind farm" in inside["snap_warnings"][0])
+t = next(z for z in turbines if z.name == "Nysted Havmøllepark (Rødsand 1)" and z.geom_km.x == max(
+    q.geom_km.x for q in turbines if q.name == "Nysted Havmøllepark (Rødsand 1)"))   # the easternmost turbine
+lon, lat = routing.to_lonlat(t.geom_km.x + 0.3, t.geom_km.y)    # 300 m east of it, outside the area
+reason = routing.point_reason(float(lat), float(lon), routing.make_rules())
+check(f"a point 300 m from a turbine: {reason}", "from a wind turbine (Nysted" in reason and "radius is 500 m" in reason)
+try:
+    routing.make_rules(turbine_radius_m=10)
+    check("turbine radius 10 m: error", False)
+except routing.RouteError as exc:
+    check(f"turbine radius 10 m: error ({exc})", "between 50 and 2000" in str(exc))
 
 print("\n=== phase 2: narrow passages (reduced buffers, COLREG Rule 9 warning) ===")
 a, b = (54.408, 11.043), (54.376, 11.213)                     # west and east of the Fehmarnsund
@@ -259,7 +407,7 @@ check("a passage buffer never exceeds the open-water buffer",
 print("\n=== phase 2: tiny unnamed zones ===")
 tiny = routing.tiny_zones()
 check(f"tiny unnamed zones (< 1 ha) in the zone file: {tiny or 'none'} (listed in the log)", isinstance(tiny, list))
-named_small = [z.name for z in zones if z.geom_km.area < 0.01 and not routing.is_tiny(z)]
+named_small = [z.name for z in zones if z.kind == "area" and z.geom_km.area < 0.01 and not routing.is_tiny(z)]
 check(f"small zones WITH a name keep their buffer ({named_small})", all(not routing.is_tiny(z) for z in zones
                                                                         if z.name in named_small))
 fake = routing.Zone("no_entry area", "no_entry", "way/0", Point(0, 0).buffer(0.03))   # ~0.28 ha, unnamed

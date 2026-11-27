@@ -77,6 +77,7 @@ def weekday_day(name: str) -> str | None:
 
 TOMORROW = offset_day(1)
 FRIDAY = weekday_day("Friday")
+SEA_NAME = tools._load_forecast_json()["sea_point"]["name"]      # e.g. "Kiel Bay (open water)"
 
 # ---------------------------------------------------------------------------
 # Checks: each takes the chat result and returns (passed, reason)
@@ -373,6 +374,7 @@ def route_and_safety(day):
 # every zone of the largest detour step and its extra km (both computed in code).
 HH_ROUTES = {"Heiligenhafen -> Damp": {"from_lat": 54.375, "from_lon": 11.03, "to_lat": 54.58, "to_lon": 10.03},
              "Heiligenhafen -> Gelting": {"from_lat": 54.40, "from_lon": 11.02, "to_lat": 54.765, "to_lon": 10.0}}
+RODSAND_ROUTE = {"from_lat": 54.55, "from_lon": 11.40, "to_lat": 54.55, "to_lon": 11.85}   # through both farms (straight)
 
 
 def main_reason_ok(route):
@@ -389,6 +391,83 @@ def main_reason_ok(route):
     return check
 
 
+def route_weather_ok(*also, first=None, day=None):
+    """Weather along the route: built in code from get_route_weather, says "along your route",
+    has passing times, every Beaufort number comes from the tool, the scope label is "Along your
+    route", and the legs are NOT listed in the text (they come as route_legs for the Details
+    table). first: the answer must start with this (the direct sentence). day: the route departs
+    that day (same time of day)."""
+    def check(r):
+        names = {t["name"] for t in r["tools_used"]}
+        if chat.ROUTE_WEATHER_TOOL not in names or not r.get("built_in_code"):
+            return False, "route weather not used / not built in code"
+        text = r["answer"]
+        if "along your route" not in text.lower():
+            return False, "no 'along your route'"
+        if not re.search(r"\b\d{2}:\d{2} UTC\b", text):
+            return False, "no passing times"
+        info = json.loads(chat.route_weather_tool(ROUTE, chat.departure_on(ROUTE, day) if day else None)())
+        if "Along your route" not in (r.get("scope") or []):
+            return False, f"scope label missing ({r.get('scope')})"
+        if len(r.get("route_legs") or []) != len(info["legs"]):
+            return False, "the legs are not in route_legs (Details table)"
+        if "Legs:" in text or len(re.findall(r"\b\d{2}:\d{2} UTC\b", text)) > 5:
+            return False, "the leg list is in the text (it belongs in Details)"
+        if first and not re.match(first, text):
+            return False, f"does not start with the direct answer ({text[:60]!r})"
+        if day and chat.nice_date(day) not in text:
+            return False, f"not for {chat.nice_date(day)}"
+        allowed = chat._bft_values(info, set())
+        wrong = {int(n) for n in chat.BFT_NUMBER.findall(text)} - allowed
+        if wrong or chat.BFT_RANGE.search(text):
+            return False, f"Beaufort not from the tool: {sorted(wrong)}"
+        missing = [w for w in also if w.lower() not in text.lower()]
+        if missing:
+            return False, f"missing {missing}"
+        if "not for navigation" not in text.lower():
+            return False, "no 'Not for navigation'"
+        return True, f"along your route, {len(info['legs'])} legs with times"
+    return check
+
+
+def sea_point_noted(check):
+    """A forecast answer while a route exists must say it is NOT the weather along the route."""
+    def wrapped(r):
+        ok, reason = check(r)
+        if not ok:
+            return ok, reason
+        if "not along your route" not in r["answer"].lower():
+            return False, "no 'not along your route' note"
+        return True, reason + ", sea-point note"
+    return wrapped
+
+
+def storm_answer_ok(r):
+    """'Will there be a storm along the way?': first a direct No / Yes with the strongest
+    Beaufort, its time and leg (computed from the route weather), then the summary."""
+    ok, reason = route_weather_ok(first=r"(No storm expected|Yes: )")(r)
+    if not ok:
+        return ok, reason
+    info = json.loads(chat.route_weather_tool(ROUTE)())
+    top = max(info["legs"], key=lambda g: (g["wind_bft"], g["wind_ms"]))
+    first = r["answer"].split(". ")[0]
+    want = (f"Beaufort {top['wind_bft']}", f"{top['time_utc'][11:16]} UTC", f"leg {top['leg']}")
+    if not all(w in first for w in want):
+        return False, f"first sentence lacks {want}: {first!r}"
+    if first.startswith("Yes") != (top["wind_bft"] >= 10):
+        return False, f"wrong Yes/No for Beaufort {top['wind_bft']}"
+    return True, f"{first[:70]}…"
+
+
+def scoped(label, check):
+    """The answer carries this scope label (shown at the top of the answer)."""
+    def wrapped(r):
+        if label not in (r.get("scope") or []):
+            return False, f"scope label {label!r} missing ({r.get('scope')})"
+        return check(r)
+    return wrapped
+
+
 def route_cases():
     facts = route_facts()
     depth = str(facts["summary"]["min_depth_m"])
@@ -400,9 +479,31 @@ def route_cases():
         ("route", "How deep is it along the way?", [], route_ok(depth), None, ROUTE),
         ("route", "Which zones does it avoid?", [], route_ok(*zones), None, ROUTE),
         ("route", "Why this detour?", [], no_route, None, None),
+        # With a route, "is it safe to sail tomorrow?" is about the route departing tomorrow (same
+        # time of day), plus one sea-point line for comparison.
         ("route", "Why does the route go north, and is it safe to sail tomorrow?", [],
-         route_and_safety(TOMORROW), None, ROUTE),
-    ] + [("route", "why this route", [], built_in_code(main_reason_ok(r)), None, r) for r in HH_ROUTES.values()]
+         route_weather_ok("Main reason", "Putlos", f"Sea point for comparison: ", day=TOMORROW), None, ROUTE),
+        ("route", "Is it safe to sail tomorrow?", [],
+         route_weather_ok("Sea point for comparison: ", first=r"(Not within|Within) your limits", day=TOMORROW),
+         None, ROUTE),
+        ("route", "Is it safe along the way?", [], route_weather_ok(first=r"(Not within|Within) your limits"),
+         None, ROUTE),
+        ("route", "What's the weather on my route?", [], route_weather_ok(first=r"Wind on your route"), None, ROUTE),
+        ("route", "Will there be a storm along the way?", [], storm_answer_ok, None, ROUTE),
+        ("route", "Is this route safe?", [], route_weather_ok(first=r"(Not within|Within) your limits: "),
+         None, ROUTE),
+        ("route", "When is it worst on my route?", [], route_weather_ok(first=r"Worst at \d{2}:\d{2} UTC on leg \d+"),
+         None, ROUTE),
+        ("route", "Why does the route go north, and is it safe along the way?", [],
+         route_weather_ok("Main reason", "Putlos"), None, ROUTE),
+        ("route", "How windy is it today?", [], scoped(f"Sea point: {SEA_NAME}",
+                                                       sea_point_noted(contains(str(daily(TODAY)["wind_max_ms"])))),
+         None, ROUTE),
+    ] + [("route", "why this route", [], built_in_code(main_reason_ok(r)), None, r) for r in HH_ROUTES.values()] + [
+        # Wind farms (Rødsand): the why answer is built in code and names both farms.
+        ("route", "Why this route?", [], built_in_code(route_ok("wind farm", "Rødsand II", "Nysted")), None, RODSAND_ROUTE),
+        ("route", "Which wind farms does the route avoid?", [], route_ok("Rødsand II", "Nysted"), None, RODSAND_ROUTE),
+    ]
 
 
 def build_cases():
@@ -495,6 +596,59 @@ def test_code(cases) -> int:
         check(f"claim check: {text!r} -> {'rejected' if bad else 'allowed'}", bool(chat.claim_problems(text)) == bad)
     check("after the retry the claim sentence is dropped",
           chat.without_claims("Caution tomorrow. This ensures a calm trip. Wind 9 m/s.") == "Caution tomorrow. Wind 9 m/s.")
+    # Phase 3: clause classification, Beaufort check, grammar, zones always named
+    check("classify: 'Is it safe along the way?' = route weather",
+          chat.split_route_question("Is it safe along the way?")["route_weather"])
+    k = chat.split_route_question("Why does the route go north, and is it safe to sail tomorrow?")
+    check(f"classify: why + 'safe to sail tomorrow' = the route tomorrow + sea point for comparison ({k})",
+          k["why"] and k["route_weather"] and k["sea_compare"] and k["rest"] == ""
+          and k["route_clause"] == "is it safe to sail tomorrow")
+    k = chat.split_route_question("How windy is it today?")
+    check("classify: 'How windy is it today?' stays a sea-point question", not k["route_weather"] and k["rest"])
+    # Route weather: the direct first sentence, per question type (built in code)
+    for q, intent in [("Will there be a storm along the way?", "storm"), ("Any gales on my route?", "storm"),
+                      ("Is this route safe?", "safe"), ("Is the trip ok?", "safe"),
+                      ("When is it worst on my route?", "worst"), ("What's the weather on my route?", "summary")]:
+        check(f"intent: {q!r} -> {intent}", chat.route_weather_intent(q) == intent, chat.route_weather_intent(q))
+    check("wind classes: storm Bft 10+, gale 8+, strong wind 6-7",
+          [chat.wind_class(b) for b in (5, 6, 7, 8, 9, 10, 12)]
+          == [None, "strong wind", "strong wind", "gale", "gale", "storm", "storm"])
+    leg = lambda n, bft, status, waves=0.5: {"leg": n, "time_utc": f"2026-11-27T1{n}:39:00+00:00", "lat": 54.5,
+                                            "lon": 10.6, "wind_ms": bft * 2.0, "wind_bft": bft, "gust_ms": None,
+                                            "gust_bft": bft + 1, "waves_m": waves, "status": status}
+    fake = {"legs": [leg(1, 4, "green"), leg(2, 5, "yellow"), leg(3, 4, "green")], "worst": leg(2, 5, "yellow"),
+            "limits": {"wind_limit_bft": 6, "waves_limit_m": 1.5}, "departure_utc": "2026-11-27T11:00:00+00:00",
+            "speed_knots": 6, "source": "test", "note": None, "rough_legs": []}
+    storm = chat.route_weather_answer(fake, "Will there be a storm along the way?")
+    safe = chat.route_weather_answer(fake, "Is this route safe?")
+    check(f"storm answer: {storm.split('. ')[0]!r}",
+          storm.startswith("No storm expected: strongest is Beaufort 5 (gusts Beaufort 6) at 12:39 UTC on leg 2."))
+    check(f"safe answer, verdict first: {safe.split('; ')[0]!r}", safe.startswith("Within your limits: no leg is above"))
+    check("the two answers differ in their first sentence", storm.split(". ")[0] != safe.split(". ")[0])
+    gale = {**fake, "legs": [leg(1, 8, "red"), leg(2, 9, "red")], "worst": leg(2, 9, "red")}
+    check("gale question with Beaufort 9 -> 'Yes: gale'",
+          chat.route_weather_answer(gale, "Will there be a gale on the way?").startswith("Yes: gale on your route"))
+    check("storm question with Beaufort 9 -> 'No storm expected … (gale)'",
+          "No storm expected: strongest is Beaufort 9" in chat.route_weather_answer(gale, "storm along the way?")
+          and "(gale)" in chat.route_weather_answer(gale, "storm along the way?"))
+    check("not safe: 'Not within your limits' first",
+          chat.route_weather_answer(gale, "is it safe along the way").startswith("Not within your limits: 2 of 2 legs"))
+    check("the legs are not listed in the text", "Legs:" not in storm and "11:39" not in storm.split("worst")[0])
+    check("departure moved to another day, same time of day",
+          chat.departure_on({"departure": "2026-11-27T14:05:00+00:00"}, "2026-11-28") == "2026-11-28T14:05:00+00:00")
+    check("scope labels", chat.scope_label({"id": "SEA", "name": "Kiel Bay (open water)"}) == "Sea point: Kiel Bay (open water)"
+          and chat.scope_label({"id": "POINT", "name": "x", "lat": 54.5, "lon": 10.6}).startswith("Selected point: 54.50"))
+    check("Beaufort range rejected", chat.beaufort_problems("Wind of Beaufort 5-6.", ['{"beaufort": 6}']) != [])
+    check("Beaufort number not from the tools rejected",
+          chat.beaufort_problems("Beaufort 7 tomorrow.", ['{"beaufort": 6}']) != [])
+    check("exact Beaufort from the tools accepted", chat.beaufort_problems("Beaufort 6 tomorrow.", ['{"beaufort": 6}']) == [])
+    one = routing.main_reason_sentence({"step": "+ restricted zones", "extra_km": 2.0, "zones_avoided": ["Putlos"]}, None)
+    two = routing.main_reason_sentence({"step": "+ restricted zones", "extra_km": 2.0,
+                                        "zones_avoided": ["Putlos", "Todendorf"]}, None)
+    check(f"grammar: '{one[:45]}…' / 'zones add'", "zone adds" in one and "zones add" in two)
+    buf = routing.main_reason_sentence({"step": "+ safety buffers (300 m)", "extra_km": 1.0}, None, ["Putlos"])
+    check(f"zones always named, also if buffers are the main reason ({buf})", "also avoids Putlos" in buf)
+    check("sea-point note", "not along your route" in chat.sea_point_note("Caution.", {"id": "SEA", "name": "Kiel Bay"}))
     runs = json.loads(hh)["route"]["route_runs"]
     check(f"wording: route_runs = '{runs}'", runs.startswith("up to ") and runs.endswith("north of the direct line")
           and "at most" not in runs)
