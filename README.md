@@ -81,20 +81,26 @@ then answers for that point. It needs an internet connection for the map tiles a
 library. The server only listens on localhost.
 
 The **Route** tab computes the shortest water route between two clicks (start, then destination)
-inside the routing area (Kiel Bay to the Fehmarnbelt, Rødsand and Gedser: 9.8–12.3° E, 54.15–55.3° N,
+inside the routing area (Kiel Bay to the Fehmarnbelt, Gedser, Møn and Faxe Bugt: 9.8–12.8° E, 54.15–55.3° N,
 drawn as a dashed boundary; a click outside it shows a note at the click and places no marker)
 on a 0.25 km grid: it avoids land, water shallower than your draft plus a safety margin (default
 2.0 + 1.0 m, EMODnet Bathymetry), and restricted zones from OpenStreetMap (no-entry areas always;
 firing areas like Todendorf and Putlos avoided or, if you choose, allowed with a high penalty),
-offshore wind farms (Rødsand II, Nysted; avoided or allowed with a penalty, and every turbine with a
+offshore wind farms (Rødsand II, Nysted, EnBW Baltic 1, Kriegers Flak; avoided or allowed with a penalty, and every turbine with a
 safety radius, default 500 m, drawn on the map), and
 keeps safety buffers (default 300 m from land, 500 m from closed zones). Shallow water is drawn as a
 blue hatched layer. The panel shows the distance in km and nautical miles, the ETA for your speed
 (default 6 knots), the minimum depth and buffer distances along the route, and a "Why this route?"
 table: the direct water route, then the extra km added by the depth rule, the zones and the buffers.
-In the named narrow passages (Fehmarnsund, Kiel Fjord at Friedrichsort) the buffers are reduced
-(default 50 m from land, 100 m from zones; the depth rule stays), and the panel warns "narrow passage
-(COLREG Rule 9): reduced clearance, keep to the fairway" and shows the full-buffer alternative. In
+In the named narrow passages (Fehmarnsund, Kiel Fjord at Friedrichsort, and the Danish sounds
+Guldborgsund, Storstrøm / Masnedsund with the Farø narrows, Ulvsund / Bøgestrøm, Grønsund) the buffers
+are reduced (default 50 m from land, 100 m from zones; the depth rule stays), and the panel warns "narrow
+passage (COLREG Rule 9): reduced clearance, keep to the fairway" and shows the full-buffer alternative.
+The panel also says which way the route goes ("Via: around Møn (east of Møns Klint) → Fehmarnsund").
+With 2.0 + 1.0 m, Bøgestrøm stays closed (the depth model has only 0.3 m there), so Faxe Bugt →
+Heiligenhafen goes around Møn (158 km). When there is no route, the message names what blocks the
+connection to the open sea: a too shallow or too narrow passage (with the values), a closed zone, the
+routing-area edge, or a channel that the coastline data doesn't show. In
 penalty mode the factor (0–20, default 10; 0 = zones cost nothing but are still listed) is set in the
 tab, and the 500 m buffer around a crossable zone is penalised, not blocked. Invalid values are
 marked in red instead of being replaced; any setting change recalculates the route. The Ask tab can explain a planned
@@ -117,12 +123,14 @@ in both data modes (`--source dummy` or `--source real` for one).
 
 ## Data sources and licences
 
-- Coastline: Natural Earth 1:10m land (public domain).
+- Coastline: Natural Earth 1:10m land (public domain; `data/land_kiel_bay.geojson`, 9.0–13.3° E, 53.8–55.8° N).
 - Water depth (Route tab): **EMODnet Bathymetry** Digital Terrain Model, © EMODnet Bathymetry Consortium,
   licensed **CC BY 4.0** (`data/depth_kiel_bay.npz`).
 - Restricted zones and wind farms (Route tab): **© OpenStreetMap contributors**, licensed **ODbL**
   (`data/restricted_zones_kiel_bay.geojson` and `data/wind_farms_kiel_bay.geojson`, from OpenStreetMap
   and OpenSeaMap tags via the Overpass API).
+- The routing data covers the routing area 9.8–12.8° E, 54.15–55.3° N and was downloaded on 27 Nov 2026
+  (`python download_land.py`, `python download_routing_data.py`).
 - Real-mode observations: Deutscher Wetterdienst (DWD) via Bright Sky; model values: Open-Meteo.com (CC BY 4.0).
 - Map tiles: © OpenStreetMap contributors.
 
