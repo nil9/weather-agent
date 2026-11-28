@@ -1,0 +1,42 @@
+Tiny unnamed zones (< 1 ha): blocked, but without a buffer: way/138783313 (firing, 0.51 ha), way/138783320 (firing, 0.49 ha), way/1417176935 (no_entry, 0.20 ha)
+=== field from batched Open-Meteo answers ===
+PASS  one entry per point: (27, 96) (points x hours)
+PASS  gusts and waves present (real)
+PASS  hourly UTC times
+
+=== legs ===
+PASS  15 legs of about 3.0 km cover the route (43.67 km)
+PASS  passing time = departure + distance / speed (shown to the minute)
+PASS  each leg uses the nearest forecast hour
+PASS  Beaufort is exact (tools._beaufort of the wind)
+PASS  the leg's values come from the nearest point and hour
+PASS  worst leg: Bft 5, waves 0.8 m (yellow)
+
+=== status at the limits (wind > Bft 6, waves > 1.5 m = too rough) ===
+PASS  status(4, 0.9) = green
+PASS  status(5, None) = yellow
+PASS  status(4, 1.0) = yellow
+PASS  status(6, 1.5) = yellow
+PASS  status(7, None) = red
+PASS  status(4, 1.6) = red
+PASS  status(5, 0.5, 4) = red
+
+=== dummy mode ===
+PASS  dummy: wind from the dummy forecast, no gusts or waves
+PASS  dummy: the waves rule is skipped
+
+=== a rough leg changes the weather-aware route ===
+PASS  the shortest route has rough legs (3)
+PASS  the weather-aware route has fewer (2)
+PASS  ... on a different, longer path (44.07 vs 43.67 km)
+PASS  ... and keeps every other rule (no land, depth >= 3 m, no closed zone)
+PASS  the comparison is returned (43.67 km, 3 rough legs)
+PASS  the breakdown has the weather step: + weather (avoid rough legs) +0.4 km (the shortest route has 3 rough leg(s), e.g. at 04:10 UTC near 54.54° N, 10.53° E…)
+PASS  nothing rough: the weather-aware route is the shortest route
+
+=== departure outside the forecast, cache ===
+PASS  departure outside the forecast: clear error (The trip (Tue 01 Dec 23:07–Wed 02 Dec 02:47 UTC) is outside the foreca…)
+PASS  one batched request per API for 27 points (2 requests)
+PASS  cached: no second request within 60 min
+
+all passed

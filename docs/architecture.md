@@ -72,7 +72,14 @@ Python tools do every calculation. The local LLM only picks which tools to call 
 
 | 36 | Route-weather chat answers (code only): ONE direct first sentence per question type (`route_weather_intent`: storm / gale / strong wind classified at Bft 10 / 8 / 6 → "No storm expected: strongest is Beaufort 5 (gusts Beaufort 6) at 15:39 UTC on leg 3" or "Yes: …"; safe → "Within / Not within your limits"; worst → time and place; else a summary), then one summary line; the legs as `route_legs` → a table under Details (not in the text); `scope` → label on each weather answer ("Along your route" / "Sea point: …"); "Answering for: Your route: Heiligenhafen → …" (`routing.place_name`, a short list of harbours and sea areas); with a route, "is it safe to sail tomorrow?" = the route departing that day at the same time of day + "Sea point for comparison: …" (`sail_safety`, code); the caution thresholds are now in the tool's `limits` | ✅ Done |
 
-*Last updated: end of step 36.*
+| 37 | Voyage planning from `docs/Ship_Voyage_Planning.pdf`: **A** rulebook `rules/passage_rules.yaml` (31 rules: id, factor, source, type hard / penalty / check / advisory / not_modelled, parameters, data); **B** `rule_checker.py` checks every route (pass / warn / fail / not modelled, value, limit, source), "Rule check" table in the Route tab, new settings gust limit + air draught, a passage outside the forecast is returned without weather and fails R-WX-04; **C** `rules/vessel_profiles.yaml` (small sailboat = old defaults, motor yacht, coaster, large ship; UKC policy → margin in code; squat Cb, dwt) with a profile selector; **D** `voyage.py`: candidates shortest / balanced / safest (duplicates removed, streamed progress), score in code (any fail = not recommended, then warnings, worst wind, waves, distance), passage plan (waypoints, ETA, course, weather + min UKC + port of refuge per leg, rule summary) and GPX export; **E** chat: read-only `get_route_recommendation`, "Which rules does it break?" / "Why not the shortest?" / "Which route do you recommend?" answered in code with rule ids, values and limits, a rule-check line in "Why this route?", the chosen candidate is explained | ✅ Done |
+
+| 38 | Fixes after testing step 37: **bridges** — the R-AIR-01 bridge lines come from OSM (`download_routing_data.py --bridges-only` → `data/bridges_kiel_bay.geojson`; a route passes under a bridge if it comes within 50 m of its line); OSM has no `seamark:bridge:clearance_height` for them, so the hand clearances stay, marked "approximate - verify on chart"; old Storstrøm Bridge and north Farø Bridge added without a clearance ("clearance unknown" warns); **squat in the router** — profiles with `squat_in_router` (motor yacht, coaster, large ship) need draft + squat + margin (Barrass, `voyage.router_settings()` → `routing.route(squat_m=…)`, also in the breakdown, the chat and the shallow layer); **forecast end** — legs after the end come as `weather.no_forecast_legs` (route still given, grey dashed, listed in the panel and the passage plan), R-WX-04 warns instead of failing; a departure before the forecast still gives the route without weather (R-WX-04 warns); **candidates** — always three rows (`rows`): "same route as Shortest" or why it couldn't be calculated; **no route** — `RouteError` carries which point, where, a short reason and its kind; `/api/route` returns them as `problem`; the page shows a red box at the top of the Route tab (headline, details, hint), a red × with a popup at the failed point, and moves a snapped marker to the water with a dashed line from the click; the API and the page accept drafts up to 20 m (the large ship has 12.5 m) | ✅ Done |
+| 39 | **Mixed questions** — the LLM gets only the weather part (`chat.weather_only()`: out-of-scope clauses, or the topic words and the joiners next to them, are dropped: "can i dance and laugh while sail tomrw?" → "Can i sail tomrw?"); the decline sentence is added in code; **frozen clock in tests** — `clock.now()` is the one place that reads the current time (default departure, chat "today", cache ages); the tests freeze it (`clock.freeze_for_tests()`: dummy data → 8 h into the dummy forecast; fixture tests → the fixture time), so they pass on any day | ✅ Done |
+| 40 | **Dummy time** — with dummy data, `clock.now()` follows the dummy calendar (the first forecast day, 08:00 UTC): the app's default departure, the chat's "today" and the router use the same clock; `/api/clock` gives it to the page, and the Route tab shows "Dummy time: Wed 25 Nov 08:00 UTC (synthetic scenario)" next to the departure. Real data keeps the real now | ✅ Done |
+| 41 | **Chat intent fixes** — safety words are typo-tolerant like the day words (`chat.safety_word()`: at most 1 edit, e.g. tsafe / saef / safty, also German sicher / gefährlich; close real words like "save" never match); a clause with a safety word is a safety question even with route words ("how tsafe is the travel path" → weather along the route); if the intent is unclear ("why" and "safe" in one clause, or only "is my route ok?") the chat asks back: "Do you mean how safe the weather is along your route, or why the route goes this way?" with two clickable chips (`choices`); repeated sentences are removed from code-built answers (`chat.without_repeats()`) | ✅ Done |
+
+*Last updated: end of step 41.*
 
 `experiments.py` doesn't change the diagrams. It imports `agent.py`, swaps the task, the system prompt
 or entries in `agent.TOOL_FUNCTIONS`, and redirects `write_report` to `reports/experiment_<scenario>.md`.
@@ -111,7 +118,10 @@ flowchart LR
     emodnet(["EMODnet Bathymetry WCS<br/>DTM, CC BY 4.0"])
     overpass(["OpenStreetMap Overpass<br/>restricted areas, ODbL"])
     dlroute["download_routing_data.py<br/>(run once)"]
-    routedata[("data/depth_kiel_bay.npz<br/>data/restricted_zones_kiel_bay.geojson<br/>data/wind_farms_kiel_bay.geojson")]
+    rulebook[("rules/passage_rules.yaml<br/>rules/vessel_profiles.yaml<br/>(from docs/Ship_Voyage_Planning.pdf)")]
+    checker["rule_checker.py<br/>route → rule report<br/>pass / warn / fail / not modelled"]
+    voyage["voyage.py<br/>candidates, recommendation (score),<br/>passage plan, GPX"]
+    routedata[("data/depth_kiel_bay.npz<br/>data/restricted_zones_kiel_bay.geojson<br/>data/wind_farms_kiel_bay.geojson<br/>data/bridges_kiel_bay.geojson")]
     web["web/index.html<br/>Leaflet + OSM tiles (dark filter)<br/>Forecast / Ask tabs"]
     browser(["Browser"])
 
@@ -159,12 +169,19 @@ flowchart LR
     routedata -->|"depth, zones (read only)"| routing
     app -->|"GET /api/route_zones"| routing
     app -->|"GET /api/route_area"| routing
+    rulebook -->|"rules, profiles (read only)"| checker
+    routedata -->|"bridge lines (read only)"| checker
+    checker -->|"zones, depth, distances"| routing
+    voyage --> checker
+    voyage -->|"route(...) per candidate"| routing
+    app -->|"GET /api/route (+ rule_check)<br/>/api/route_candidates (streamed)<br/>/api/passage_plan(.gpx)"| voyage
+    chat -->|"rule report, recommendation<br/>(read-only tool + code answers)"| voyage
     land -->|"land/sea check"| tools
 
     classDef done fill:#d4edda,stroke:#28a745,color:#155724
     classDef todo fill:#f1f3f5,stroke:#adb5bd,color:#495057,stroke-dasharray: 5 5
     classDef switchnode fill:#fff3cd,stroke:#d39e00,color:#664d03
-    class gen,data,tools,agent,llm,app,web,chat,compare,real,realdata,omcache,brightsky,openmeteo,outdummy,outreal,routing,land,emodnet,overpass,dlroute,routedata done
+    class gen,data,tools,agent,llm,app,web,chat,compare,real,realdata,omcache,brightsky,openmeteo,outdummy,outreal,routing,land,emodnet,overpass,dlroute,routedata,rulebook,checker,voyage done
     class dsswitch switchnode
 ```
 

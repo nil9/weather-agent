@@ -16,13 +16,15 @@ import json
 import logging
 import re
 import time
-from datetime import date, datetime, timedelta, timezone
+from datetime import date, timedelta
 
 from openai import APIError, APITimeoutError
 
 import agent
+import clock
 import route_weather as rw
 import routing
+import voyage
 import tools
 
 MAX_CHAT_STEPS = 6          # LLM calls per question (tool calls + final answer + one retry)
@@ -56,12 +58,13 @@ ON_TOPIC_WORDS = re.compile(
     r"stations?|north|east|south|west|exclud\w*|suspect|"
     r"sail\w*|boat\w*|safe\w*|sea|bay|"
     r"rout\w*|path|detour\w*|depth\w*|deep\w*|shallow\w*|draft|zones?|firing|buffer\w*|"
-    r"wind ?farms?|turbines?)\b", re.IGNORECASE)
+    r"wind ?farms?|turbines?|which rules?|rules? (does|do|did|would) (it|this|the route|my route)|R-[A-Z]+-\w+|recommend\w*|candidates?|shortest|passage plan)\b", re.IGNORECASE)
 
 # Questions about the planned route (Route tab). They need get_route_explanation, and
 # without a planned route they get NO_ROUTE_ANSWER (in code, no LLM).
 ROUTE_WORDS = re.compile(r"\b(rout\w*|path|detour\w*|depth\w*|deep\w*|shallow\w*|draft|zones?|"
-                         r"firing( areas?)?|restricted|buffer\w*|eta|distance|wind ?farms?|turbines?)\b",
+                         r"firing( areas?)?|restricted|buffer\w*|eta|distance|wind ?farms?|turbines?|"
+                         r"which rules?|rules? (does|do|did|would) (it|this|the route|my route)|R-[A-Z]+-\w+|recommend\w*|candidates?|shortest|passage plan)\b",
                          re.IGNORECASE)
 COMPASS_WORDS = re.compile(r"\b(north|east|south|west)\w*\b", re.IGNORECASE)
 NO_ROUTE_ANSWER = "Plan a route in the Route tab first."
@@ -113,7 +116,56 @@ def mentions_station(text: str, stations: list[dict]) -> bool:
 
 
 # Questions that need a specific tool: answering them from memory is rejected in code.
-SAFETY_WORDS = re.compile(r"\b(safe|safety|sail\w*|boat\w*|go(ing)? out|dangerous|risk\w*)\b", re.I)
+SAFETY_WORDS = re.compile(r"\b(safe|safety|safer|safest|safely|unsafe|sail\w*|boat\w*|go(ing)? out|danger\w*|risk\w*|"
+                          r"sicher\w*|gefährlich|gefaehrlich|gefahr)\b", re.I)
+
+# Typo-tolerant safety words, like the day words: "tsafe", "saef", "safty" -> "safe" / "safety";
+# German "sicher" / "gefährlich" too. A word is matched if it is at most 1 edit (insert, delete,
+# change, swap of two neighbours) away from a safety word (2 edits for long words), and starts
+# with the same letter or contains the safety word ("tsafe"). Real words that are close but mean
+# something else ("save", "same") are never matched.
+SAFETY_VOCAB = {"safe": "safe", "safety": "safety", "dangerous": "dangerous", "danger": "dangerous",
+                "risky": "risky", "sicher": "safe", "sicherheit": "safety", "gefährlich": "dangerous",
+                "gefaehrlich": "dangerous", "gefahr": "dangerous"}
+NOT_SAFETY = {"save", "saves", "same", "sale", "sage", "sake", "safes", "cafe", "wafe",
+              "dancer", "ranger", "manger", "hanger", "anger", "sicken"}
+
+
+def edit_distance(a: str, b: str) -> int:
+    """Edits between two words (insert, delete, change, swap of two neighbours)."""
+    prev2, prev = None, list(range(len(b) + 1))
+    for i in range(1, len(a) + 1):
+        cur = [i] + [0] * len(b)
+        for j in range(1, len(b) + 1):
+            cur[j] = min(prev[j] + 1, cur[j - 1] + 1, prev[j - 1] + (a[i - 1] != b[j - 1]))
+            if i > 1 and j > 1 and a[i - 1] == b[j - 2] and a[i - 2] == b[j - 1]:
+                cur[j] = min(cur[j], prev2[j - 2] + 1)
+        prev2, prev = prev, cur
+    return prev[-1]
+
+
+def safety_word(word: str) -> str | None:
+    """One word -> the safety word it means ("tsafe" -> "safe"), or None."""
+    word = word.lower()
+    if word in SAFETY_VOCAB:
+        return SAFETY_VOCAB[word]
+    if len(word) < 4 or not word.isalpha() or word in NOT_SAFETY:
+        return None
+    for target, meaning in SAFETY_VOCAB.items():
+        allowed = 2 if len(target) >= 8 else 1
+        if (word[0] == target[0] or target in word) and edit_distance(word, target) <= allowed:
+            return meaning
+    return None
+
+
+def normalize_safety_words(question: str) -> str:
+    """Typos of safety words replaced by the word they mean, before any intent check:
+    "how tsafe is the travel path" -> "how safe is the travel path"."""
+    def fix(m):
+        word = m.group(0)
+        meant = safety_word(word)
+        return meant if meant and not SAFETY_WORDS.fullmatch(word) else word     # real words stay
+    return re.sub(r"[^\W\d_]+", fix, question)
 STATION_WORDS = re.compile(r"\b(stations?|NORTH|EAST|SOUTH|WEST|exclud\w*|weights?|suspect)\b", re.I)
 # Words that ask for forecast VALUES. ("forecast" itself is not one: "Which stations are used
 # for the forecast?" is a station question.)
@@ -189,7 +241,7 @@ def today_date(data: dict | None = None) -> str | None:
     if not dates:
         return None
     if tools.DATA_SOURCE == "real":
-        return datetime.now(timezone.utc).date().isoformat()
+        return clock.now().date().isoformat()
     return dates[0]
 
 
@@ -344,6 +396,44 @@ def without_advice(answer: str, topics: list[str]) -> str:
     return " ".join(s for s in _sentences(answer) if s not in bad)
 
 
+# Small words that join the other part to the weather part ("dance AND laugh WHILE sailing").
+JOINERS = {"and", "or", "while", "whilst", "when", "also", "then", "after", "before", "during", "with", "but", ","}
+
+
+def weather_only(question: str, topics: list[str]) -> str:
+    """The weather part of a mixed question, for the LLM (code adds the decline sentence):
+    "Is it safe to sail tomorrow and what should I cook for dinner?" -> "Is it safe to sail tomorrow?"
+    (whole clauses dropped); "can i dance and laugh while sail tomrw?" -> "can i sail tomrw?"
+    (topic words and the joiners next to them dropped). The question unchanged if no topic
+    word is found or nothing about the weather would be left."""
+    stems = [topic_stem(t) for t in topics if t != "other"]
+
+    def has_topic(text):
+        return any(re.search(rf"\b{re.escape(stem)}", text, re.I) for stem in stems)
+
+    if not stems or not has_topic(question):
+        return question
+    keep = [c for c in _clauses(question) if not has_topic(c)]
+    if keep and any(_is_weather_clause(c) for c in keep):
+        text = " and ".join(keep)
+    else:
+        tokens = re.findall(r"[\w']+|[^\w\s]", question)
+        drop = {i for i, t in enumerate(tokens) if has_topic(t)}
+        changed = True
+        while changed:                       # joiners next to a dropped word go too
+            changed = False
+            for i, t in enumerate(tokens):
+                if i not in drop and t.lower() in JOINERS and (i - 1 in drop or i + 1 in drop):
+                    drop.add(i)
+                    changed = True
+        kept = [t for i, t in enumerate(tokens) if i not in drop and t != "?"]
+        text = re.sub(r"\s+([^\w\s'])", r"\1", " ".join(kept)).strip(" ,;")
+        if not (_is_weather_clause(text) or resolve_days(text)):
+            return question
+    text = text.strip(" ,;?")
+    return text[0].upper() + text[1:] + "?" if text else question
+
+
 def is_why_route_question(question: str) -> bool:
     return bool(WHY_WORDS.search(question) and ROUTE_WORDS.search(question))
 
@@ -367,8 +457,14 @@ def weather_part(question: str) -> str:
 ROUTE_WEATHER_TOOL = "get_route_weather"
 # "along the way", "on my route", "the trip" ...: a weather / safety clause with one of these is
 # about the weather ALONG the planned route, not at the sea point.
-ROUTE_REF = re.compile(r"\b(along|on (my|the|your) (route|way|trip)|my route|the route|your route|"
-                       r"the way|trip|journey|passage|crossing|route)\b", re.IGNORECASE)
+ROUTE_REF = re.compile(r"\b(along|on (my|the|your) (route|way|trip|path)|my route|the route|your route|"
+                       r"the way|trip|journey|passage|crossing|route|path|travel\w*)\b", re.IGNORECASE)
+
+# "Is my route ok?": a route question that could mean the weather along it OR why it goes this
+# way. Too little to decide on, so the chat asks back (CLARIFY_*).
+VAGUE_WORDS = re.compile(r"\b(ok|okay|good|fine|alright|all right|how is|how's|what about)\b", re.IGNORECASE)
+CLARIFY_ANSWER = "Do you mean how safe the weather is along your route, or why the route goes this way?"
+CLARIFY_CHOICES = ["How safe is the weather along my route?", "Why does the route go this way?"]
 
 
 def _clauses(question: str) -> list[str]:
@@ -388,22 +484,44 @@ def split_route_question(question: str) -> dict:
         safety clause without a route reference ("is it safe to sail tomorrow?"): it is about
         the planned route then, and gets a sea-point line for comparison (sea_compare)
     route_clause: the text of those clauses (decides storm / safe / worst / summary, and the day)
-    rest: other weather clauses without a route reference ("how windy is it today") -> LLM."""
-    why = route_weather = sea_compare = False
+    rest: other weather clauses without a route reference ("how windy is it today") -> LLM
+    clarify: the intent is unclear, ask back (CLARIFY_ANSWER): a clause asks both "why" and
+        "safe" ("why is the route safe?"), or only vaguely about the route ("is my route ok?").
+    Priority: a clause with a safety word is a safety question, even with route words in it
+    ("how safe is the travel path"). Typos of safety words are fixed first ("tsafe")."""
+    why = route_weather = sea_compare = clarify = False
+    rules = why_not_shortest = recommend = False
     rest, route_clauses = [], []
-    for clause in _clauses(question):
-        if WHY_WORDS.search(clause) and ROUTE_WORDS.search(clause):
+    for clause in _clauses(normalize_safety_words(question)):
+        safety = bool(SAFETY_WORDS.search(clause))
+        asks_why = bool(WHY_WORDS.search(clause) and ROUTE_WORDS.search(clause))
+        if WHY_NOT_SHORTEST.search(clause):
+            why_not_shortest = True
+        elif RULE_WORDS.search(clause):
+            rules = True
+        elif RECOMMEND_WORDS.search(clause):
+            recommend = True
+        elif safety and asks_why:
+            clarify = True                                   # two intents tie
+        elif asks_why:
             why = True
+        elif safety and ROUTE_REF.search(clause):
+            route_weather = True
+            route_clauses.append(clause)
         elif _is_weather_clause(clause) and ROUTE_REF.search(clause):
             route_weather = True
             route_clauses.append(clause)
-        elif _is_weather_clause(clause) and SAFETY_WORDS.search(clause):
+        elif safety and _is_weather_clause(clause):
             route_weather = sea_compare = True
             route_clauses.append(clause)
         elif _is_weather_clause(clause):
             rest.append(clause)
+        elif ROUTE_REF.search(clause) and VAGUE_WORDS.search(clause):
+            clarify = True                                   # too little to decide on
     text = " and ".join(rest)
     return {"why": why, "route_weather": route_weather, "sea_compare": sea_compare,
+            "rules": rules, "why_not_shortest": why_not_shortest, "recommend": recommend,
+            "clarify": clarify and not (why or route_weather or rules or why_not_shortest or recommend or rest),
             "route_clause": " and ".join(route_clauses),
             "rest": (text[0].upper() + text[1:] + "?") if text else ""}
 
@@ -501,6 +619,11 @@ def route_weather_answer(info: dict, question: str = "") -> str:
     legs above the limits, worst leg). The per-leg list is NOT in the text: the page shows it as
     a table under "Details" (answer field route_legs)."""
     legs, lim = info["legs"], info["limits"]
+    beyond = info.get("no_forecast_legs") or []
+    if not legs and beyond:
+        return (f"No forecast for this trip: all {len(beyond)} legs are after the end of the forecast "
+                f"({nice_date(info['forecast_end_utc'][:10])} {_time(info['forecast_end_utc'])} UTC), so the weather "
+                "along your route can't be given. Choose an earlier departure time.")
     if not legs:
         return "No legs: the route has no length."
     first = route_direct_sentence(route_weather_intent(question), question, info)
@@ -512,6 +635,10 @@ def route_weather_answer(info: dict, question: str = "") -> str:
              f"arrival about {_time(arr)} UTC; {rough} of {len(legs)} legs above your limits (Beaufort "
              f"{lim['wind_limit_bft']}, waves {lim['waves_limit_m']:g} m); worst: leg {w['leg']} at "
              f"{_time(w['time_utc'])} UTC, {_wind(w)}{_waves(w)}."]
+    if beyond:
+        parts.append(f"No forecast for the last {len(beyond)} legs (legs {beyond[0]['leg']}–{beyond[-1]['leg']}, "
+                     f"from {_time(beyond[0]['time_utc'])} UTC): the forecast ends "
+                     f"{nice_date(info['forecast_end_utc'][:10])} {_time(info['forecast_end_utc'])} UTC.")
     if info.get("note"):
         parts.append(f"Note: {info['note']}.")
     parts.append(f"Weather: {info['source']}.")
@@ -544,18 +671,185 @@ def scope_label(point: dict) -> str:
     return f"Sea point: {point['name']}"
 
 
+# --- Rules and recommendation (rule_checker.py / voyage.py, all in code) ----------------------
+RULE_WORDS = re.compile(r"\b(which rules?|rules? (does|do|did|would) (it|this|the route|my route)|R-[A-Z]+-\w+|break(s|ing)?|broken|violat\w*|compl(y|ies|iance|iant))\b", re.I)
+WHY_NOT_SHORTEST = re.compile(r"\bwhy\b.*\bnot\b.*\bshort\w*|\bnot the shortest\b", re.I)
+RECOMMEND_WORDS = re.compile(r"\b(recommend\w*|which route|best route|candidates?|passage plan)\b", re.I)
+POINT_KEYS = ("from_lat", "from_lon", "to_lat", "to_lon")
+
+
+def with_candidate(route: dict) -> dict:
+    """The route as shown in the Route tab: a chosen candidate ("safest", ...) applies its
+    settings (voyage.CANDIDATES); "candidate" itself is not a route setting."""
+    kind = route.get("candidate")
+    out = {k: v for k, v in route.items() if k != "candidate"}
+    return voyage.candidate_settings(kind, out) if kind else out
+
+
+def _split(route: dict) -> tuple[list, dict]:
+    return [route[k] for k in POINT_KEYS], {k: v for k, v in route.items() if k not in POINT_KEYS}
+
+
+def _rule_text(row: dict) -> str:
+    """'R-WX-01 (Wind along the route: max Beaufort 7 at 14:10 UTC (leg 1); limit ≤ Beaufort 6)'"""
+    factor = row["factor"].split(" (")[0]
+    value = row["value"] if row["value"] is not None else row.get("detail") or ""
+    return f"{row['id']} ({factor}: {value}" + (f"; limit {row['limit']}" if row["limit"] else "") + ")"
+
+
+def rule_report(route: dict) -> dict:
+    """The planned route checked against every rule (code)."""
+    points, settings = _split(route)
+    return voyage.checked_route(*points, settings)["rule_check"]
+
+
+def recommendation(route: dict) -> dict:
+    """The candidates and the recommendation for the planned route's points and settings (code)."""
+    points, settings = _split({k: v for k, v in route.items() if k != "candidate"})
+    for event in voyage.candidates(*points, settings):
+        if event["type"] == "result":
+            return event
+    return {"candidates": [], "error": "no result"}
+
+
+def rules_answer(report: dict) -> str:
+    """'Which rules does it break?': failed and warned rules with ids, values and limits."""
+    rows = report["rows"]
+    fails = [r for r in rows if r["status"] == "fail"]
+    warns = [r for r in rows if r["status"] == "warn"]
+    nm = [r["id"] for r in rows if r["status"] == "not_modelled"]
+    parts = [f"This route breaks {len(fails)} rule{'s' if len(fails) != 1 else ''}: "
+             + "; ".join(_rule_text(r) for r in fails) + "." if fails else "This route breaks none of the checked rules."]
+    if warns:
+        parts.append(f"Warnings ({len(warns)}): " + "; ".join(_rule_text(r) for r in warns) + ".")
+    parts.append(f"{report['counts']['pass']} rules pass. Not modelled, so not checked ({len(nm)}): {', '.join(nm)}.")
+    return " ".join(parts)
+
+
+def rule_line(report: dict) -> str:
+    """One line for the "why" answer: the rule-check result with rule ids."""
+    c = report["counts"]
+    fails = [r["id"] for r in report["rows"] if r["status"] == "fail"]
+    warns = [r["id"] for r in report["rows"] if r["status"] == "warn"]
+    return (f"Rule check: {c['fail']} failed" + (f" ({', '.join(fails)})" if fails else "")
+            + f", {c['warn']} warnings" + (f" ({', '.join(warns)})" if warns else "")
+            + f", {c['pass']} passed, {c['not_modelled']} not modelled.")
+
+
+def _cand(rec: dict, kind: str) -> dict | None:
+    return next((c for c in rec["candidates"] if c["kind"] == kind), None)
+
+
+def _short_label(c: dict) -> str:
+    return c["label"].split(" (")[0].lower()
+
+
+def recommendation_answer(rec: dict) -> str:
+    """'Which route do you recommend?': the recommended candidate (scored in code) and why."""
+    if not rec.get("candidates"):
+        return f"No candidate route: {rec.get('error', 'none found')}."
+    best = _cand(rec, rec["recommended"] or rec["least_bad"])
+    head = (f"Recommended: the {_short_label(best)} route" if rec["recommended"]
+            else f"No candidate passes every rule; the least bad is the {_short_label(best)} route (not recommended)")
+    nf, nw = len(best["fails"]), len(best["warnings"])
+    text = (f"{head} ({best['distance_km']} km, ETA {best['eta_text']}, {nf} failed rule{'s' if nf != 1 else ''}, "
+            f"{nw} warning{'s' if nw != 1 else ''}). Order: {', '.join(rec['ranking'])} ({rec['rule']}).")
+    if rec["reasons"]:
+        text += " " + " ".join(f"{r}." for r in rec["reasons"])
+    for row in rec.get("rows") or []:
+        if row.get("duplicate_of"):
+            text += f" {row['label'].split(' (')[0]}: same route as {row['duplicate_label']}."
+        elif row.get("error"):
+            text += f" {row['label'].split(' (')[0]}: not possible ({row.get('short') or row['error']})."
+    if "rows" not in rec and len(rec["candidates"]) < len(voyage.CANDIDATES):
+        text += f" {len(voyage.CANDIDATES) - len(rec['candidates'])} candidate(s) were the same route as another."
+    return text
+
+
+def why_not_shortest_answer(rec: dict) -> str:
+    """'Why not the shortest?': the shortest candidate against the recommended one, with the
+    rule ids, values and limits that make the difference (code)."""
+    short = _cand(rec, "shortest")
+    if not rec.get("candidates") or short is None:
+        return f"No shortest route to compare: {rec.get('error', 'not computed')}."
+    best_kind = rec["recommended"] or rec["least_bad"]
+    if best_kind == "shortest":
+        return (f"The shortest route ({short['distance_km']} km) is the "
+                + ("recommended one" if rec["recommended"] else "least bad one (no candidate passes every rule)")
+                + (f": the other candidates rank lower ({' '.join(r + '.' for r in rec['reasons'])})" if rec["reasons"]
+                   else ": the other candidates are the same route") + ".")
+    best = _cand(rec, best_kind)
+    rows = {r["id"]: r for r in short["rule_check"]["rows"]}
+    extra_fails = [rows[i] for i in short["fails"] if i not in best["fails"]]
+    extra_warns = [rows[i] for i in short["warnings"] if i not in best["warnings"]]
+    text = (f"The shortest route ({short['distance_km']} km, ETA {short['eta_text']}) ranks below the "
+            f"{_short_label(best)} route ({best['distance_km']} km, ETA {best['eta_text']}, "
+            f"+{round(best['distance_km'] - short['distance_km'], 2)} km).")
+    if extra_fails:
+        text += " The shortest route breaks " + "; ".join(_rule_text(r) for r in extra_fails) + "."
+    if extra_warns:
+        text += (f" It has {len(short['warnings'])} warnings against {len(best['warnings'])}; only on the shortest: "
+                 + "; ".join(_rule_text(r) for r in extra_warns) + ".")
+    if not extra_fails and not extra_warns:
+        text += f" {voyage.compare(best, short)}."
+    if not rec["recommended"]:
+        text += f" Note: no candidate passes every rule ({', '.join(best['fails'])} fail on the {_short_label(best)} route too)."
+    return text
+
+
+def recommendation_tool(route: dict):
+    """Read-only: the candidates, the recommendation and the planned route's rule report."""
+    def get_route_recommendation(**_ignored):
+        rec = recommendation(route)
+        report = rule_report(route)
+        return {
+            "planned_route_rule_check": {"counts": report["counts"],
+                                         "failed": [_rule_text(r) for r in report["rows"] if r["status"] == "fail"],
+                                         "warnings": [_rule_text(r) for r in report["rows"] if r["status"] == "warn"],
+                                         "not_modelled": [r["id"] for r in report["rows"] if r["status"] == "not_modelled"]},
+            "candidates": [{k: c[k] for k in ("kind", "label", "distance_km", "eta_text", "worst_wind_bft",
+                                              "worst_gust_bft", "worst_waves_m", "min_ukc_m", "fails", "warnings")}
+                           for c in rec.get("candidates", [])],
+            "recommended": rec.get("recommended"), "least_bad": rec.get("least_bad"),
+            "ranking": rec.get("ranking"), "scoring_rule": rec.get("rule"), "reasons": rec.get("reasons"),
+            "note": "Rules from docs/Ship_Voyage_Planning.pdf, checked in code. " + routing.NOT_FOR_NAVIGATION,
+        }
+    return tools._as_json(get_route_recommendation)
+
+
+RECOMMENDATION_TOOL = "get_route_recommendation"
+RECOMMENDATION_SPEC = tools._spec(
+    RECOMMENDATION_TOOL,
+    "Route recommendation for the planned route's start and destination: up to 3 candidate routes "
+    "(shortest, balanced, safest) checked against the passage-planning rules (rule ids like R-UKC-01), "
+    "which one is recommended and why, and the rule check of the planned route (failed / warned / "
+    "not modelled rules with values and limits). Use it for questions about rules or the recommendation.")
+
+
+def routing_args(route: dict, func=None) -> dict:
+    """Only the route settings `func` (default routing.route) takes: the Route tab also sends
+    rule settings such as air draught or the vessel profile, which only the rule checker uses;
+    voyage.router_settings() adds the profile's squat allowance (squat_m)."""
+    import inspect
+    names = inspect.signature(func or routing.route).parameters
+    return {k: v for k, v in voyage.router_settings(route).items() if k in names}
+
+
 def route_weather_tool(route: dict, departure: str | None = None):
     """The read-only route-weather tool, bound to the planned route (weather at each leg's
     passing time, computed in code). `departure` overrides the route's departure time
     ("is it safe to sail tomorrow?" -> the same route, departing tomorrow)."""
     def get_route_weather(**_ignored):
-        r = routing.route(**{**route, "weather": route.get("weather") if route.get("weather") in ("show", "aware")
+        r = routing.route(**{**routing_args(route), "weather": route.get("weather") if route.get("weather") in ("show", "aware")
                              else "show", **({"departure": departure} if departure else {})})
         w = r["weather"]
         return {"departure_utc": w["departure_utc"], "speed_knots": r["speed_kn"], "variant": w["variant"],
                 "legs": [{k: g[k] for k in ("leg", "from_km", "to_km", "time_utc", "lat", "lon", "wind_ms", "wind_bft",
                                             "gust_ms", "gust_bft", "waves_m", "status")} for g in w["legs"]],
                 "worst": w["worst"], "rough_legs": w["rough_legs"], "limits": w["limits"],
+                "no_forecast_legs": [{k: g[k] for k in ("leg", "time_utc", "lat", "lon")}
+                                     for g in w.get("no_forecast_legs") or []],
+                "forecast_end_utc": w.get("forecast_end_utc"),
                 "source": w["source"], "note": w["note"]}
     return tools._as_json(get_route_weather)
 
@@ -675,10 +969,31 @@ def not_for_navigation(answer: str, tools_used: list[dict]) -> str:
     return answer
 
 
-def note_other_topic(answer: str, topics: list[str]) -> str:
-    """If the question is mixed and the answer doesn't say the rest is out of scope,
-    add one fixed sentence."""
-    if not topics or OUTSIDE_SCOPE.search(answer):
+def without_repeats(text: str) -> str:
+    """Code-built answers are put together from parts (why, rule line, weather along the route,
+    ...); a sentence that two parts both say is kept only once (the first time)."""
+    pieces = re.split(r"((?<=[.!?])\s+)", text.strip())     # sentence, gap, sentence, gap, ...
+    seen, out, gap = set(), [], None
+    for i in range(0, len(pieces), 2):
+        sentence = pieces[i]
+        here = pieces[i - 1] if i > 0 else ""
+        key = re.sub(r"\s+", " ", sentence).strip().lower()
+        if key and key in seen:
+            gap = here if gap is None else gap                # keep the gap (a line break) before it
+            continue
+        seen.add(key)
+        if out:
+            out.append(here if gap is None else gap)
+        gap = None
+        out.append(sentence)
+    return "".join(out)
+
+
+def note_other_topic(answer: str, topics: list[str], always: bool = False) -> str:
+    """Mixed question: add one fixed decline sentence in code. `always`: the LLM saw only the
+    weather part (weather_only), so the sentence is always added; otherwise only if the
+    answer doesn't already say the rest is out of scope."""
+    if not topics or OTHER_TOPIC_NOTE in answer or (not always and OUTSIDE_SCOPE.search(answer)):
         return answer
     return f"{answer} {OTHER_TOPIC_NOTE}"
 
@@ -1044,7 +1359,7 @@ def route_tool(route: dict):
     (routing.explain); the LLM only explains it. The coordinates of the path are left out."""
     def get_route_explanation(**_ignored):
         # The model sometimes adds arguments (e.g. a date); the route alone decides the answer.
-        e = routing.explain(**route)
+        e = routing.explain(**routing_args(route, routing.explain))
         s, rows = e["summary"], e["detour"]
         direct = rows[0]["distance_km"]
         side = s["detour_side"]
@@ -1103,6 +1418,7 @@ ROUTE_TOOL_SPEC = tools._spec(
 def _answer_question(question: str, history: list[dict] | None, point: dict | None,
                      deadline: float, route: dict | None = None) -> dict:
     history = without_refusals((history or [])[-MAX_HISTORY:])
+    question = normalize_safety_words(question)    # "tsafe" -> "safe", before every intent check
     try:
         data = tools.load_forecast_data(point)     # forecast of THIS point, computed in code
     except tools.LandDataMissing:
@@ -1128,15 +1444,38 @@ def _answer_question(question: str, history: list[dict] | None, point: dict | No
     route_legs = None                     # legs for the Details table (weather along the route)
     scope = []                            # labels at the top of the answer: what it is about
     if route is not None:
+        route = with_candidate(route)             # the chosen candidate's settings (Route tab)
         functions[ROUTE_TOOL] = route_tool(route)
+        functions[RECOMMENDATION_TOOL] = recommendation_tool(route)
         functions[ROUTE_WEATHER_TOOL] = route_weather_tool(route)
         kinds = split_route_question(question)
+        if kinds["clarify"]:
+            # Unclear intent: ask back, with the two meanings as clickable chips (page: `choices`).
+            return {"answer": CLARIFY_ANSWER, "choices": CLARIFY_CHOICES, "tools_used": [], "safety": [],
+                    "on_topic": True, "built_in_code": True, "clarify": True, "point": data["sea_point"],
+                    "scope": ["Your route"]}
         parts = []
         if kinds["why"]:
             out = functions[ROUTE_TOOL]()
             parts.append(json.loads(out)["error"] if agent.is_error(out) else
                          why_route_answer(json.loads(out)).removesuffix(routing.NOT_FOR_NAVIGATION).rstrip())
             code_calls.append({"name": ROUTE_TOOL, "args": {}, "by": "code"})
+        try:
+            if kinds["why"] or kinds["rules"]:
+                report = rule_report(route)
+                parts.append(rules_answer(report) if kinds["rules"] else rule_line(report))
+                code_calls.append({"name": "rule_check", "args": {}, "by": "code"})
+            if kinds["why_not_shortest"] or kinds["recommend"]:
+                rec = recommendation(route)
+                if kinds["why_not_shortest"]:
+                    parts.append(why_not_shortest_answer(rec))
+                if kinds["recommend"]:
+                    parts.append(recommendation_answer(rec))
+                code_calls.append({"name": RECOMMENDATION_TOOL, "args": {}, "by": "code"})
+            if kinds["rules"] or kinds["why_not_shortest"] or kinds["recommend"]:
+                scope.append("Your route: rule check")
+        except routing.RouteError as exc:
+            parts.append(f"No rule check: {exc}")
         if kinds["route_weather"]:
             # "Is it safe to sail tomorrow?": the same route, departing that day at the same time.
             days = resolve_days(kinds["route_clause"], data, history)
@@ -1156,13 +1495,13 @@ def _answer_question(question: str, history: list[dict] | None, point: dict | No
                     parts.append(sea_point_comparison(data, day))
                     code_calls.append({"name": "sail_safety", "args": {"day": day}, "by": "code"})
         if parts:
-            route_text = " ".join(parts) + f" {routing.NOT_FOR_NAVIGATION}"
+            route_text = without_repeats(" ".join(parts) + f" {routing.NOT_FOR_NAVIGATION}")
             if not kinds["rest"]:
                 return {"answer": route_text, "tools_used": code_calls, "safety": [], "on_topic": True,
                         "built_in_code": True, "point": data["sea_point"], "route_legs": route_legs,
                         "scope": scope}
             # Mixed: the route parts are done in code; the LLM gets ONLY the other weather clause.
-            for name in (ROUTE_TOOL, ROUTE_WEATHER_TOOL):
+            for name in (ROUTE_TOOL, ROUTE_WEATHER_TOOL, RECOMMENDATION_TOOL):
                 functions.pop(name, None)
             question = kinds["rest"]
             topic = question_topic(question, history)
@@ -1171,13 +1510,21 @@ def _answer_question(question: str, history: list[dict] | None, point: dict | No
     # the checks and the sentences code adds. Code and LLM never use different days.
     asked = resolve_days(question, data, history)
     other = other_topics(question, deadline)
-    notes = [f"This question is about {', '.join(f'{nice_date(d)} (tool argument {d})' for d in asked)}. "
+    stripped = False
+    if other:
+        # Mixed question: the LLM gets ONLY the weather part; code adds the decline sentence.
+        weather_question = weather_only(question, other)
+        stripped = weather_question != question
+        if stripped:
+            question = weather_question
+            topic = question_topic(question, history)
+    notes =[f"This question is about {', '.join(f'{nice_date(d)} (tool argument {d})' for d in asked)}. "
              "Answer only for " + ("this day." if len(asked) == 1 else "these days.")
              if asked else "The question names no specific day."]
     if route_text:
         notes.append("The route part of this question is already answered separately. Answer ONLY the "
                      "weather / sailing part, and don't talk about the route.")
-    if other:
+    if other and not stripped:
         notes.append(f"The question also asks about {', '.join(other)}. The forecast can't answer that: "
                      "give NO advice on it, only say in one short sentence that it is outside what "
                      "this forecast can answer.")
@@ -1190,7 +1537,8 @@ def _answer_question(question: str, history: list[dict] | None, point: dict | No
 
     def all_specs():
         return (tools.chat_tool_specs(data) + ([ROUTE_TOOL_SPEC] if ROUTE_TOOL in functions else [])
-                + ([ROUTE_WEATHER_SPEC] if ROUTE_WEATHER_TOOL in functions else []))
+                + ([ROUTE_WEATHER_SPEC] if ROUTE_WEATHER_TOOL in functions else [])
+                + ([RECOMMENDATION_SPEC] if RECOMMENDATION_TOOL in functions else []))
     specs = all_specs()
     tool_results, tools_used, safety = [], [], []
     cache = {}                     # (tool, normalized args) -> result, for THIS question only
@@ -1208,6 +1556,7 @@ def _answer_question(question: str, history: list[dict] | None, point: dict | No
             answer = f"{route_text.removesuffix(routing.NOT_FOR_NAVIGATION).rstrip()} {answer}"
             if routing.NOT_FOR_NAVIGATION.lower() not in answer.lower():
                 answer += f" {routing.NOT_FOR_NAVIGATION}"
+            answer = without_repeats(answer)
             tools_used[:0] = code_calls
         labels = scope + ([scope_label(data["sea_point"])]
                           if any(u["name"] in FORECAST_TOOLS and u.get("by") != "code" for u in tools_used) else [])
@@ -1268,7 +1617,7 @@ def _answer_question(question: str, history: list[dict] | None, point: dict | No
                                 topic if not route_text else ROUTE_WORDS.sub(" ", topic), data,
                                 days=asked, other=other, route_planned=llm_route)
         if not problems:
-            return result(not_for_navigation(ensure_main_reason(note_other_topic(answer, other), tool_results),
+            return result(not_for_navigation(ensure_main_reason(note_other_topic(answer, other, stripped), tool_results),
                                              tools_used))
         if retried:
             if all(p.startswith(STRIPPABLE_PROBLEMS) for p in problems):
@@ -1278,7 +1627,7 @@ def _answer_question(question: str, history: list[dict] | None, point: dict | No
                 if cleaned and not check_answer(cleaned, question, tools_used, tool_results, safety, topic, data,
                                                 days=asked, other=other, route_planned=llm_route):
                     return result(not_for_navigation(
-                        ensure_main_reason(note_other_topic(cleaned, other), tool_results), tools_used))
+                        ensure_main_reason(note_other_topic(cleaned, other, stripped), tool_results), tools_used))
             return result(UNRELIABLE_ANSWER)
         retried = True
         # The rejected answer is NOT added to the conversation (the model would just

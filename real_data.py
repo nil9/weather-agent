@@ -27,6 +27,7 @@ import urllib.request
 
 import pandas as pd
 
+import clock
 import tools
 
 BRIGHTSKY_URL = os.environ.get("BRIGHTSKY_URL", "https://api.brightsky.dev")
@@ -79,7 +80,7 @@ def _iso(ts: pd.Timestamp) -> str:
 
 
 def _now() -> pd.Timestamp:
-    return pd.Timestamp.now(tz="UTC")
+    return clock.now()
 
 
 def http_get(url: str, params: dict, timeout: float) -> dict:

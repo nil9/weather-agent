@@ -1,0 +1,227 @@
+Tiny unnamed zones (< 1 ha): blocked, but without a buffer: way/138783313 (firing, 0.51 ha), way/138783320 (firing, 0.49 ha), way/1417176935 (no_entry, 0.20 ha)
+=== never crosses land ===
+PASS  across the bay: 26.38 km, no land crossed
+PASS  across the bay: computed in 0.07 s (< 1 s)
+PASS  across the bay: snapped square (176, 168) is water
+PASS  across the bay: snapped square (199, 271) is water
+PASS  Laboe (outer Kiel Fjord) -> sea point: 21.75 km, no land crossed
+PASS  Laboe (outer Kiel Fjord) -> sea point: computed in 0.05 s (< 1 s)
+PASS  Laboe (outer Kiel Fjord) -> sea point: snapped square (114, 107) is water
+PASS  Laboe (outer Kiel Fjord) -> sea point: snapped square (176, 168) is water
+PASS  Eckernförde Bay -> east of Fehmarn: 98.98 km, no land crossed
+PASS  Eckernförde Bay -> east of Fehmarn: computed in 0.11 s (< 1 s)
+PASS  Eckernförde Bay -> east of Fehmarn: snapped square (141, 20) is water
+PASS  Eckernförde Bay -> east of Fehmarn: snapped square (132, 400) is water
+PASS  Kiel Bay -> Little Belt: 64.32 km, no land crossed
+PASS  Kiel Bay -> Little Belt: computed in 0.08 s (< 1 s)
+PASS  Kiel Bay -> Little Belt: snapped square (176, 168) is water
+PASS  Kiel Bay -> Little Belt: snapped square (398, 38) is water
+PASS  west -> east of Fehmarn: 30.0 km, no land crossed
+PASS  west -> east of Fehmarn: computed in 0.07 s (< 1 s)
+PASS  west -> east of Fehmarn: snapped square (154, 297) is water
+PASS  west -> east of Fehmarn: snapped square (132, 400) is water
+
+=== same point ===
+PASS  same point: 0 km, ETA 0, one point
+
+=== around Fehmarn ===
+PASS  the straight line crosses Fehmarn (so the test means something)
+PASS  the route does not touch Fehmarn
+PASS  the route (30.0 km) is longer than the straight line (26.4 km)
+
+=== other ===
+PASS  swapped start/end: same distance (30.0 vs 30.0 km)
+PASS  a point on land snaps to water (4.29 km)
+PASS  far inland: clear error
+PASS  outside the area: clear error
+PASS  6 nm = 11.112 km
+PASS  ETA text: 1 h
+PASS  ETA = distance in nm / speed
+PASS  twice the speed: half the time
+PASS  speed 0: error
+
+=== cost terms (extension point) ===
+PASS  without the zone the route goes through it
+PASS  with the zone the route avoids it
+PASS  ... and is longer (25.62 vs 22.5 km)
+PASS  the term is listed in the result
+PASS  an extra-cost term still finds a water route
+
+=== phase 2: data files ===
+PASS  depth grid (1104, 2880) covers the routing box
+PASS  sea point is about 19 m deep (18.899999618530273 m)
+PASS  Fehmarn interior is land in the depth data
+PASS  firing areas Todendorf and Putlos are in the zone file
+PASS  exercise areas are ignored by default
+
+=== phase 2: every route keeps the rules (defaults: 3.0 m depth, 300 m from land, 500 m from zones) ===
+PASS  across the bay: 26.38 km in 0.09 s, no land
+PASS  across the bay: min depth 17.2 m (25 m samples 17.2 m) >= 3.0 m
+PASS  across the bay: >= 300 m from land (exact 13302 m)
+PASS  across the bay: >= 500 m from closed zones (exact 2772 m)
+PASS  Kiel Bay -> west of Fehmarn (past the firing areas): 43.67 km in 0.09 s, no land
+PASS  Kiel Bay -> west of Fehmarn (past the firing areas): min depth 6.6 m (25 m samples 6.6 m) >= 3.0 m
+PASS  Kiel Bay -> west of Fehmarn (past the firing areas): >= 300 m from land (exact 3788 m)
+PASS  Kiel Bay -> west of Fehmarn (past the firing areas): >= 500 m from closed zones (exact 618 m)
+PASS  west -> east of Fehmarn: 31.06 km in 0.09 s, no land
+PASS  west -> east of Fehmarn: min depth 4.9 m (25 m samples 4.9 m) >= 3.0 m
+PASS  west -> east of Fehmarn: >= 300 m from land (exact 449 m)
+PASS  west -> east of Fehmarn: >= 500 m from closed zones (exact 619 m)
+PASS  Kiel Bay -> Little Belt: 64.32 km in 0.14 s, no land
+PASS  Kiel Bay -> Little Belt: min depth 8.9 m (25 m samples 8.9 m) >= 3.0 m
+PASS  Kiel Bay -> Little Belt: >= 300 m from land (exact 730 m)
+PASS  Kiel Bay -> Little Belt: >= 500 m from closed zones (exact 4438 m)
+PASS  Kiel Bay -> Gedser: 113.58 km in 0.20 s, no land
+PASS  Kiel Bay -> Gedser: min depth 5.1 m (25 m samples 5.1 m) >= 3.0 m
+PASS  Kiel Bay -> Gedser: >= 300 m from land (exact 731 m)
+PASS  Kiel Bay -> Gedser: >= 500 m from closed zones (exact 520 m)
+PASS  the rules are listed
+
+=== phase 2: speed (0.25 km grid) ===
+PASS  Eckernförde Bay -> east of Fehmarn: 86.87 km in 0.17 s (< 2 s)
+PASS  its detour breakdown (4 routes): 1.12 s (< 4 s)
+
+=== extended area: Fehmarnbelt, Rødsand, Gedser, Møn, Faxe Bugt (to 12.8° E, 55.3° N) ===
+PASS  the routing area is (9.8, 54.15, 12.8, 55.3)
+PASS  Heiligenhafen -> Rødsand: 43.55 km, ends east of Fehmarn (snap 0.04 km)
+PASS  ... no land, depth >= 3.0 m (25 m samples 3.0 m)
+PASS  ... through the Fehmarnsund with the Rule 9 warning (['Fehmarnsund'])
+PASS  ... passage buffers kept: >= 100 m from closed zones (exact 101 m), >= 50 m from land (exact 687 m)
+PASS  ... the full-buffer alternative goes around Fehmarn (52.3 km)
+PASS  Little Belt -> Gedser: 147.34 km in 0.25 s (< 2 s)
+PASS  its detour breakdown: 1.04 s (< 4 s)
+PASS  east of 12.8° E: 'Outside the routing area'
+PASS  north of 55.3° N: 'Outside the routing area'
+
+=== Danish sounds and Faxe Bugt (narrow passages, no-route explanations) ===
+PASS  Faxe Bugt -> Heiligenhafen: 158.03 km in 1.22 s (< 2 s), via ['around Møn (east of Møns Klint)', 'Fehmarnsund']
+PASS  ... the panel names the passage it used (['Fehmarnsund'], warning: Fehmarnsund: narrow passage (COLREG Rule…)
+PASS  ... rules kept (depth 3.0 m >= 3 m, land 462 m >= 50 m, zones 101 m >= 100 m: passage buffers)
+PASS  through Grønsund: 29.37 km, via ['Grønsund'], Rule 9 warning for ['Grønsund']
+PASS  Stege Bugt, 3 m needed: Bøgestrøm stays closed and is named (Start: No usable water within 5 km: the water here is 2.9 m …)
+PASS  Stege Bugt, 1.5 m needed: through Bøgestrøm (27.04 km, via ['Ulvsund / Bøgestrøm'])
+PASS  Guldborgsund: the coastline data has no open channel, said so (Destination: No usable water within 5 km: the wate…)
+PASS  Bodden: the water continues across the east edge, said so
+PASS  Little Belt -> Faxe Bugt: 238.84 km in 0.39 s (< 2 s)
+PASS  its detour breakdown: 1.48 s (< 4 s)
+
+=== wind farms (OpenStreetMap): areas + offshore turbines with a safety radius ===
+PASS  wind farm areas at Rødsand are in the data (['EnBW Baltic 1', 'Kriegers Flak A', 'Nysted Havmøllepark (Rødsand 1)', 'Rødsand II Havmøllepark'])
+PASS  231 offshore turbines as points, all in water
+PASS  wind farms are blocked by default
+PASS  the straight line runs through both Rødsand wind farms (so the test means something)
+PASS  near Rødsand: 30.6 km in 0.08 s, no land, outside both farm areas
+PASS  ... >= 500 m from every turbine (exact 627 m, reported 630 m, nearest: Nysted Havmøllepark (Rødsand 1))
+PASS  ... >= 500 m from the farm areas (zone buffer, exact 505 m)
+PASS  ... and the rules still hold (min depth 4.7 m, land 6278 m)
+PASS  turbine radius 1000 m: >= 1000 m from every turbine (exact 1004 m), longer (30.96 vs 30.6 km)
+PASS  penalty mode, factor 0: straight through, the farms are still listed (['Nysted Havmøllepark (Rødsand 1)', 'Rødsand II Havmøllepark'])
+PASS  penalty mode, factor 10: goes around (0 km inside: 0.0 km)
+PASS  breakdown: '+ restricted zones and wind farms (turbines 500 m)' +1.27 km (avoids Nysted Havmøllepark (Rødsand 1) (wind farm), Rødsand II Havmøllepark (wind farm))
+PASS  main reason sentence: Main reason: the wind farms add 1.27 km, because the route avoids Nysted Havmøllepark (Rød…
+PASS  penalty mode: the breakdown names the farms it goes around (avoids Nysted Havmøllepark (Rødsand 1) (wind farm; penalty: going arou…)
+PASS  the breakdown lists the wind farms in the summary
+PASS  a click inside a wind farm is moved out, with the reason (The start was moved 2.4 km to the nearest usable water: this point is inside Rødsand II Havmøll…)
+PASS  a point 300 m from a turbine: this point is 300 m from a wind turbine (Nysted Havmøllepark (Rødsand 1)); the turbine radius is 500 m
+PASS  turbine radius 10 m: error (The turbine radius must be between 50 and 2000 m.)
+
+=== phase 2: narrow passages (reduced buffers, COLREG Rule 9 warning) ===
+PASS  Fehmarnsund with the default buffers: 11.72 km (about 12 km, not ~50 km around Fehmarn)
+PASS  ... with the narrow-passage warning (Fehmarnsund: narrow passage (COLREG Rule 9): reduced clearance, keep to the fairway)
+PASS  ... keeps >= 100 m from closed zones in the passage (exact 101 m)
+PASS  ... and >= 50 m from land (exact 687 m)
+PASS  ... the depth rule stays fully active (min 3.0 m, 25 m samples 3.0 m)
+PASS  ... the full-buffer alternative: 52.03 km, ETA 4 h 41 min (around Fehmarn)
+PASS  without the passage exception the sound is closed (52.03 km)
+PASS  Kiel Fjord Holtenau -> Laboe opens: 7.64 km, start moved only 0.03 km
+PASS  ... with the warning (Kiel Fjord (Friedrichsort narrows): narrow passage (COLREG Rule 9): reduced clearance, keep to the fairway)
+PASS  ... the full-buffer alternative says why it isn't possible (not possible from these points (The start was moved 4.5 km to the near…)
+PASS  open-water routes get no passage warning
+PASS  a passage buffer never exceeds the open-water buffer
+
+=== phase 2: tiny unnamed zones ===
+PASS  tiny unnamed zones (< 1 ha) in the zone file: [{'osm': 'way/138783313', 'category': 'firing', 'area_ha': 0.51}, {'osm': 'way/138783320', 'category': 'firing', 'area_ha': 0.49}, {'osm': 'way/1417176935', 'category': 'no_entry', 'area_ha': 0.2}] (listed in the log)
+PASS  small zones WITH a name keep their buffer (['Muschelzucht', 'Moltörp', 'Pülsen', 'Grabensee'])
+PASS  an unnamed zone under 1 ha counts as tiny
+PASS  a named one doesn't
+
+=== phase 2: safety buffers ===
+PASS  Heiligenhafen -> Gelting: 77.88 km, >= 500 m from the firing areas (exact 680 m)
+PASS  ... and >= 300 m from land (exact 1545 m)
+PASS  the buffers are reported
+PASS  a 1500 m zone buffer keeps >= 1.5 km (exact 1.63 km)
+
+=== phase 2: a known shallow area ===
+PASS  Heiligenhafen: the straight line crosses shallow water (1.5 m < 3 m)
+PASS  Heiligenhafen: the route keeps >= 3.0 m (min 4.5 m, 25 m samples 4.5 m)
+
+=== phase 2: the draft changes the route (Stoller Grund, ~5 m) ===
+PASS  Stoller Grund: the straight line crosses 5.2 m
+PASS  draft 2.0 + 1.0 m crosses the shoal (min 5.2 m)
+PASS  draft 4.5 + 1.0 m goes around it (min 5.6 m >= 5.5 m)
+PASS  ... on a different, longer path (6.58 vs 6.52 km)
+
+=== phase 2: firing areas ===
+PASS  the straight line crosses ['Schießgebiet Todendorf', 'Schießgebiet Putlos']
+PASS  zones avoided: the route (43.67 km) touches no firing area
+PASS  penalty mode, factor 1: going around (+11.4 km) is still cheaper than 25 km inside the zones (43.47 km, crosses [])
+
+=== phase 2: why a click is rejected ===
+PASS  inside a firing area: the reason names it (Start: No usable water within 5 km: this point is inside Schießgebiet Todendorf (firing area, closed with the current settings). No route from here: the water here is cut off from the open sea with these settings. Blocked: the water near 54.41° N, 10.56° E: closed zone Schießgebiet Todendorf.)
+PASS  far inland: the reason names it (Start: No usable water within 5 km: this point is on land.)
+PASS  too shallow: values in the reason (the water here is 1.5 m deep, the boat needs at least 3 m (draft + safety margin))
+
+=== phase 2: snapping ===
+PASS  a click in 1.5 m water snaps to 4.7 m (>= 3.0 m), 0.21 km away
+
+=== phase 2: detour breakdown ===
+PASS  four steps: ['direct water route', '+ depth rule', '+ restricted zones and wind farms', '+ safety buffers']
+PASS  the zone step names the avoided firing areas (['Schießgebiet Putlos', 'Schießgebiet Todendorf'])
+PASS  main reason: restricted zones and wind farms (turbines 500 m): +10.21 km (avoids Schießgebiet Putlos, Schießgebiet Todendorf)
+PASS  the route bulges {'side': 'north', 'max_offset_km': 11.0}
+PASS  the extra km add up (11.42 = 43.67 - 32.25)
+PASS  Stoller Grund, 4.5 m draft: the depth step names the shoal (the direct route crosses water only 5.1 m deep at 54.454° N, 10.330° E; the boat needs 5.5 m)
+
+=== phase 2: the breakdown is never meaningfully negative ===
+PASS  noise shown as '≈ 0 km (grid rounding)' (0.0 km)
+PASS  noise shown as '≈ 0 km (grid rounding)' (0.03 km)
+PASS  noise shown as '≈ 0 km (grid rounding)' (0.0 km)
+PASS  noise shown as '≈ 0 km (grid rounding)' (0.06 km)
+PASS  noise shown as '≈ 0 km (grid rounding)' (0.0 km)
+PASS  noise shown as '≈ 0 km (grid rounding)' (0.0 km)
+PASS  noise shown as '≈ 0 km (grid rounding)' (0.03 km)
+PASS  noise shown as '≈ 0 km (grid rounding)' (0.0 km)
+PASS  noise shown as '≈ 0 km (grid rounding)' (0.03 km)
+PASS  noise shown as '≈ 0 km (grid rounding)' (0.0 km)
+PASS  noise shown as '≈ 0 km (grid rounding)' (0.0 km)
+PASS  noise shown as '≈ 0 km (grid rounding)' (0.0 km)
+PASS  noise shown as '≈ 0 km (grid rounding)' (0.0 km)
+PASS  noise shown as '≈ 0 km (grid rounding)' (0.02 km)
+PASS  noise shown as '≈ 0 km (grid rounding)' (0.02 km)
+PASS  no step makes the route more than 0.2 km shorter (worst 0.0 km)
+
+=== phase 2: penalty factor ===
+PASS  factor 0.5: the route crosses the corner (0.65 km inside, 4.88 km)
+PASS  factor 20: it goes around (0.0 km inside, 6.45 km)
+PASS  the table explains it: crossing would save 1.85 km but its 0.98 km inside firing area count as 19.68 km penalty (factor 20)
+PASS  penalty factor -1: refused with a message (The penalty factor must be between 0 and 20.)
+PASS  penalty factor 25: refused with a message (The penalty factor must be between 0 and 20.)
+PASS  penalty factor nan: refused with a message (The penalty factor must be between 0 and 20.)
+
+=== phase 2: penalty factor 0 (zones cost nothing, still listed) ===
+PASS  Heiligenhafen -> Damp: factor 0 = direct water + depth rule (65.47 vs 65.47 km)
+PASS  Heiligenhafen -> Damp: with all other rules, factor 0 = penalty zones ignored (65.31 vs 65.31 km)
+PASS  Kiel Bay -> west of Fehmarn: factor 0 = direct water + depth rule (32.25 vs 32.25 km)
+PASS  Kiel Bay -> west of Fehmarn: with all other rules, factor 0 = penalty zones ignored (32.25 vs 32.25 km)
+PASS  firing-area corner: factor 0 = direct water + depth rule (4.6 vs 4.6 km)
+PASS  firing-area corner: with all other rules, factor 0 = penalty zones ignored (4.6 vs 4.6 km)
+PASS  factor 0 still lists the crossed zones
+
+=== phase 2: the zone buffer follows the zone's mode ===
+PASS  penalty mode: the 500 m ring around crossable zones costs the penalty (1398 squares)
+PASS  ... and usable (not a hard block): 966 of 1398 ring squares usable in penalty mode, 1 in block mode (the rest: land, depth or no-entry areas)
+
+=== phase 2: shallow-water layer ===
+PASS  the layer grows with the draft (22764 -> 37014 squares)
+
+all passed

@@ -15,6 +15,7 @@ import pandas as pd
 
 import real_data
 import route_weather as rw
+import clock
 import routing
 import tools
 
@@ -35,6 +36,7 @@ def fixture_field() -> rw.Field:
 
 FIELD = fixture_field()
 DEPARTURE = FIELD.times[0] + pd.Timedelta(hours=3)
+clock.freeze(DEPARTURE)     # "now" (the default departure) is inside the saved forecast, on any day
 
 # --- 1. The field from the batched answers --------------------------------------------
 print("=== field from batched Open-Meteo answers ===")
@@ -130,10 +132,20 @@ check("nothing rough: the weather-aware route is the shortest route",
 print("\n=== departure outside the forecast, cache ===")
 rw.get_field = lambda points: FIELD
 try:
-    routing.route(*A, *B, weather="show", departure=FIELD.times[-1] + pd.Timedelta(days=2))
-    check("departure outside the forecast: error", False, "no error")
-except routing.RouteError as exc:
-    check(f"departure outside the forecast: clear error ({str(exc)[:70]}…)", "outside the forecast" in str(exc))
+    after = routing.route(*A, *B, weather="show", departure=FIELD.times[-1] + pd.Timedelta(days=2))
+    check("departure after the forecast: a route, every leg in no_forecast_legs (no weather)",
+          not after["weather"]["legs"] and after["weather"]["no_forecast_legs"]
+          and all(g["status"] == "none" for g in after["weather"]["no_forecast_legs"]))
+    try:
+        routing.route(*A, *B, weather="show", departure=FIELD.times[0] - pd.Timedelta(days=1))
+        check("departure before the forecast: error", False, "no error")
+    except routing.RouteError as exc:
+        check(f"departure before the forecast: clear error ({str(exc)[:70]}…)", "outside the forecast" in str(exc))
+    try:
+        rw.legs_along(after["path"], FIELD.times[-1] + pd.Timedelta(days=2), 6, FIELD)
+        check("legs_along (all legs needed): error past the forecast", False, "no error")
+    except rw.RouteWeatherError as exc:
+        check("legs_along (all legs needed): error past the forecast", "outside the forecast" in str(exc))
 finally:
     rw.get_field = original_get
 

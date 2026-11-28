@@ -1,0 +1,84 @@
+Tiny unnamed zones (< 1 ha): blocked, but without a buffer: way/138783313 (firing, 0.51 ha), way/138783320 (firing, 0.49 ha), way/1417176935 (no_entry, 0.20 ha)
+=== Phase A: rulebook (rules/passage_rules.yaml) ===
+PASS  31 rules load and validate (unique ids, known types, sources)
+PASS  types used: {'hard': 4, 'penalty': 2, 'check': 8, 'advisory': 6, 'not_modelled': 11}
+PASS  modelled rule R-UKC-01: Under-keel clearance (minimum depth along the route)
+PASS  modelled rule R-UKC-02: Squat allowance (UKC left after squat at the planned speed)
+PASS  modelled rule R-ZONE-01: No-entry areas (no-go)
+PASS  modelled rule R-ZONE-02: Military firing and restricted areas
+PASS  modelled rule R-WIND-01: Offshore wind farms and turbines
+PASS  modelled rule R-BUF-01: Clearing distance from land (open water)
+PASS  modelled rule R-BUF-02: Clearing distance from closed zones
+PASS  modelled rule R-COLREG-09: Narrow channels (reduced clearance in a named narrow passage)
+PASS  modelled rule R-WX-01: Wind along the route (sustained, at each leg's passing time)
+PASS  modelled rule R-WX-02: Gusts along the route
+PASS  modelled rule R-WX-03: Waves along the route
+PASS  modelled rule R-AREA-01: Routing-area limits (data coverage)
+PASS  not modelled, with a reason: R-ENC-01 (Official charts / ENCs and Notices to Mariners)
+PASS  not modelled, with a reason: R-NTM-01 (Navigational warnings and firing notices)
+PASS  not modelled, with a reason: R-AIS-01 (Traffic density (crossing ferries, fishing, convergence points))
+PASS  not modelled, with a reason: R-ICE-01 (Ice and winter navigation)
+PASS  not modelled, with a reason: R-CUR-01 (Currents and water level (set and drift, effect on UKC))
+PASS  not modelled, with a reason: R-TSS-01 (Traffic separation schemes and deep-water routes)
+PASS  not modelled, with a reason: R-PILOT-02 (Compulsory pilotage areas and pilot boarding points)
+PASS  not modelled, with a reason: R-REP-01 (Mandatory reporting and VTS (BELTREP, SOUNDREP, GOFREP))
+PASS  COLREG Rule 9 is cited for narrow passages
+PASS  UKC rule is fed by the existing settings (draft, margin)
+
+=== Phase B: rule checker (rule_checker.check_route) ===
+PASS  one row per rule (31), route + rule check in 0.34 s (< 3 s)
+PASS  every row has id, factor, status, source
+PASS  failed / warned rules first, not modelled last
+PASS  Kiel Bay -> west of Fehmarn: R-UKC-01 pass (min depth 6.6 m = UKC 4.6 m; limit UKC ≥ 1 m (draft 2 m + 1 m = 3 m))
+PASS  Kiel Bay -> west of Fehmarn: R-ZONE-01 pass (none crossed; limit closed (always))
+PASS  Kiel Bay -> west of Fehmarn: R-ZONE-02 pass (none crossed; limit block (penalty factor 10))
+PASS  Kiel Bay -> west of Fehmarn: R-WIND-01 pass (nearest turbine 4230 m; limit block; turbine radius 500 m)
+PASS  Kiel Bay -> west of Fehmarn: R-BUF-01 pass (3502 m from land (outside narrow passages); limit ≥ 300 m)
+PASS  Kiel Bay -> west of Fehmarn: R-BUF-02 pass (571 m from closed zones (outside narrow passages; nearest Schießgebiet Todendorf); limit ≥ 500 m)
+PASS  Kiel Bay -> west of Fehmarn: R-COLREG-09 pass (no narrow passage; limit open-water buffers kept)
+PASS  Kiel Bay -> west of Fehmarn: R-WX-04 pass (forecast covers 03:00–06:47 UTC; limit whole passage inside the forecast)
+PASS  not modelled rules reported as such (11)
+PASS  R-WX-01 uses the route weather: warn (max Beaufort 5 at 04:42 UTC (leg 7); ≤ Beaufort 6 (caution from 5))
+PASS  R-WX-02 / R-WX-03 checked with real gusts / waves: max gusts Beaufort 6 at 06:32 UTC (leg 14); max waves 0.8 m at 03:39 UTC (leg 3)
+PASS  a higher gust limit changes R-WX-02 (the setting feeds the rule)
+PASS  squat estimated (Barrass): UKC after squat 4.38 m (squat 0.22 m at 6 kn, Cb 0.6)
+PASS  Fehmarnsund: R-COLREG-09 warns (reduced clearance in Fehmarnsund (min 133 m from land))
+PASS  ... and R-BUF-01 / R-BUF-02 still pass (reduced clearance only inside the passage)
+PASS  air draught 14 m under the Fehmarnsund Bridge (about 23 m): pass
+PASS  air draught 22 m under the Fehmarnsund Bridge (about 23 m): warn
+PASS  air draught 25 m under the Fehmarnsund Bridge (about 23 m): fail
+PASS  ports of refuge per leg: farthest from a harbour: leg 14, 11.0 nm to Puttgarden
+PASS  penalty mode, factor 0: R-ZONE-02 warns with the km inside (crosses Schießgebiet Putlos, Schießgebiet Todendorf (25.71 km inside))
+PASS  draft 11 m: R-PILOT-01 warns (draft 11 m)
+PASS  UKC: min depth >= draft + margin -> R-UKC-01 pass
+PASS  passage outside the forecast: R-WX-04 fails with the reason, the other weather rules are not modelled
+PASS  dummy data: gusts and waves are 'not modelled' (wind only), wind is checked
+
+=== Phase C: vessel profiles (rules/vessel_profiles.yaml) ===
+PASS  profiles: ['coaster', 'large_ship', 'motor_yacht', 'small_sailboat'], default small_sailboat
+PASS  the default profile (small sailboat) equals the old default settings (nothing changes)
+PASS  UKC policy -> margin in code: large ship 15 % of 12.5 m, min 2 m = 2.0 m; coaster 1.0 m
+PASS  unknown profile: error
+PASS  large ship, Kiel Bay -> Fehmarnbelt: 55.05 km, min depth 15.0 m >= 14.5 m
+PASS  ... R-PILOT-01 warns (draft 12.5 m >= 11 m) and R-ROUTE-T warns (75,000 dwt)
+PASS  ... squat uses the profile's block coefficient (UKC after squat 0.89 m (squat 1.61 m at 14 kn, Cb 0.82))
+PASS  small sailboat on the same trip: no pilot / Route T warning
+PASS  coaster (6.5 m needed) can't use the Fehmarnsund: around Fehmarn (55.62 km, via [])
+PASS  coaster, draft adjusted to 2.0 m, air draught 28 m through the Fehmarnsund: R-AIR-01 fails (air draught 28 m under Fehmarnsund Bridge (clearance about 23 m))
+PASS  the user can still adjust a profile value (air draught 20 m -> R-AIR-01 passes)
+PASS  large ship in shallow water: no route, explained (Destination: No usable water within 5 km: the water here is 6.6 m deep…)
+
+=== Phase D: candidates, recommendation, passage plan ===
+PASS  3 candidates computed with progress events ([(1, 'shortest'), (2, 'balanced'), (3, 'safest')]) in 0.6 s (< 10 s)
+PASS  duplicates removed: kept ['shortest', 'safest'], dropped [('balanced', 'shortest')]
+PASS  recommended: safest (ranking ['safest', 'shortest'])
+PASS  the reasons compare the candidates: ['Safest (weather-aware, full buffers, all zones avoided) over Shortest: 3 warnings vs 4']
+PASS  the safest candidate avoids the Fehmarnsund Rule 9 warning (full buffers)
+PASS  score: a hard fail is never recommended; then fewer warnings, then lower wind (['d', 'c', 'b', 'a'])
+PASS  every candidate fails: none recommended, the least bad is named
+PASS  passage plan: 7 waypoints with increasing ETAs, 18 legs
+PASS  ... weather, min UKC and a port of refuge per leg
+PASS  ... the rule-check summary ({'pass': 17, 'warn': 3, 'fail': 0, 'not_modelled': 11})
+PASS  GPX 1.1: one route point per waypoint (7), with ETA times and 'NOT FOR NAVIGATION'
+
+all passed

@@ -8,8 +8,11 @@ import time
 
 from shapely.geometry import LineString, Point, box
 
+import clock
 import routing
 import tools
+
+clock.freeze_for_tests()    # "now" is fixed: the tests give the same result on any day
 
 failures = 0
 

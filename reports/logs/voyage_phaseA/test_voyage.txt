@@ -1,0 +1,27 @@
+=== Phase A: rulebook (rules/passage_rules.yaml) ===
+PASS  31 rules load and validate (unique ids, known types, sources)
+PASS  types used: {'hard': 4, 'penalty': 2, 'check': 8, 'advisory': 6, 'not_modelled': 11}
+PASS  modelled rule R-UKC-01: Under-keel clearance (minimum depth along the route)
+PASS  modelled rule R-UKC-02: Squat allowance (UKC left after squat at the planned speed)
+PASS  modelled rule R-ZONE-01: No-entry areas (no-go)
+PASS  modelled rule R-ZONE-02: Military firing and restricted areas
+PASS  modelled rule R-WIND-01: Offshore wind farms and turbines
+PASS  modelled rule R-BUF-01: Clearing distance from land (open water)
+PASS  modelled rule R-BUF-02: Clearing distance from closed zones
+PASS  modelled rule R-COLREG-09: Narrow channels (reduced clearance in a named narrow passage)
+PASS  modelled rule R-WX-01: Wind along the route (sustained, at each leg's passing time)
+PASS  modelled rule R-WX-02: Gusts along the route
+PASS  modelled rule R-WX-03: Waves along the route
+PASS  modelled rule R-AREA-01: Routing-area limits (data coverage)
+PASS  not modelled, with a reason: R-ENC-01 (Official charts / ENCs and Notices to Mariners)
+PASS  not modelled, with a reason: R-NTM-01 (Navigational warnings and firing notices)
+PASS  not modelled, with a reason: R-AIS-01 (Traffic density (crossing ferries, fishing, convergence points))
+PASS  not modelled, with a reason: R-ICE-01 (Ice and winter navigation)
+PASS  not modelled, with a reason: R-CUR-01 (Currents and water level (set and drift, effect on UKC))
+PASS  not modelled, with a reason: R-TSS-01 (Traffic separation schemes and deep-water routes)
+PASS  not modelled, with a reason: R-PILOT-02 (Compulsory pilotage areas and pilot boarding points)
+PASS  not modelled, with a reason: R-REP-01 (Mandatory reporting and VTS (BELTREP, SOUNDREP, GOFREP))
+PASS  COLREG Rule 9 is cited for narrow passages
+PASS  UKC rule is fed by the existing settings (draft, margin)
+
+all passed

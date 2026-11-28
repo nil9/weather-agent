@@ -1,5 +1,5 @@
 {
-  "generated_at": "2026-11-26T08:27:19Z",
+  "generated_at": "2026-11-28T16:50:19Z",
   "sea_point": {
     "id": "SEA",
     "name": "Kiel Bay (open water)",
@@ -51,38 +51,40 @@
   "forecast": {
     "daily": [
       {
-        "date": "2026-11-26",
-        "from_utc": "08:00",
-        "temp_min_c": 2.7,
-        "temp_max_c": 5.0,
-        "pressure_mean_hpa": 1025.8,
-        "wind_max_ms": 8.2,
-        "wind_warning": null
-      },
-      {
-        "date": "2026-11-27",
-        "temp_min_c": 2.5,
-        "temp_max_c": 5.1,
-        "pressure_mean_hpa": 1026.6,
-        "wind_max_ms": 8.2,
-        "wind_warning": null
-      },
-      {
         "date": "2026-11-28",
-        "temp_min_c": 2.5,
-        "temp_max_c": 5.1,
-        "pressure_mean_hpa": 1026.7,
-        "wind_max_ms": 8.2,
+        "from_utc": "17:00",
+        "temp_min_c": -1.9,
+        "temp_max_c": -0.6,
+        "pressure_mean_hpa": 1032.5,
+        "wind_max_ms": 5.8,
+        "wind_warning": null
+      },
+      {
+        "date": "2026-11-29",
+        "temp_min_c": -2.4,
+        "temp_max_c": -0.1,
+        "pressure_mean_hpa": 1029.7,
+        "wind_max_ms": 5.9,
+        "wind_warning": null
+      },
+      {
+        "date": "2026-11-30",
+        "temp_min_c": -2.5,
+        "temp_max_c": -0.2,
+        "pressure_mean_hpa": 1028.8,
+        "wind_max_ms": 5.9,
         "wind_warning": null
       }
     ],
     "pressure_trend": {
-      "label": "steady",
-      "change_hpa": 0.9,
-      "from_hpa": 1025.8,
-      "to_hpa": 1026.7
+      "label": "falling",
+      "change_hpa": -3.7,
+      "from_hpa": 1032.5,
+      "to_hpa": 1028.8
     },
-    "warnings": [],
+    "warnings": [
+      "Falling pressure: -3.7 hPa over the period"
+    ],
     "stations_used": [
       "KIEL-HOLTENAU",
       "SCHOENHAGEN",
@@ -94,6 +96,6 @@
   "report": "reports/real/forecast_report.md",
   "model": "qwen2.5:7b",
   "data_source": "real",
-  "data_time": "2026-11-26T07:00:00Z",
+  "data_time": "2026-11-28T16:00:00Z",
   "data_note": null
 }

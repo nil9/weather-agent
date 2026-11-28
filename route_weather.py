@@ -20,6 +20,7 @@ from dataclasses import dataclass
 import numpy as np
 import pandas as pd
 
+import clock
 import real_data
 import tools
 
@@ -61,6 +62,12 @@ class Field:
         d = (np.asarray(x)[..., None] - fx) ** 2 + (np.asarray(y)[..., None] - fy) ** 2
         return d.argmin(axis=-1)
 
+    def covers(self, when) -> np.ndarray:
+        """True for each time inside the forecast period (nearest hour within 30 minutes)."""
+        when = pd.DatetimeIndex(np.atleast_1d(pd.to_datetime(when, utc=True)))
+        half = pd.Timedelta(minutes=30)
+        return np.asarray((when >= self.times[0] - half) & (when <= self.times[-1] + half))
+
     def hour_index(self, when) -> np.ndarray:
         """Index of the nearest forecast hour; RouteWeatherError if outside the forecast."""
         when = pd.DatetimeIndex(np.atleast_1d(pd.to_datetime(when, utc=True)))
@@ -89,7 +96,7 @@ def _cache_path(points: list[tuple[float, float]]):
 def fetch_real(points: list[tuple[float, float]], now: pd.Timestamp | None = None) -> Field:
     """Open-Meteo for all points: one batched Forecast request and one batched Marine request,
     cached CACHE_MIN minutes. On failure the last good answer is used (with a note)."""
-    now = now or pd.Timestamp.now(tz="UTC")
+    now = now or clock.now()
     points = [(round(a, 2), round(b, 2)) for a, b in points]
     path = _cache_path(points)
     cached = json.loads(path.read_text(encoding="utf-8")) if path.exists() else None
@@ -188,7 +195,21 @@ def status(bft: int, waves: float | None, wind_limit_bft: int = ROUGH_WIND_BFT,
 def legs_along(path: list[list[float]], departure: pd.Timestamp, speed_kn: float, field: Field,
                wind_limit_bft: int = ROUGH_WIND_BFT, waves_limit_m: float = ROUGH_WAVES_M,
                leg_km: float = LEG_KM) -> list[dict]:
-    """The route cut into legs of leg_km, each with its passing time and weather."""
+    """The route cut into legs of leg_km, each with its passing time and weather.
+    RouteWeatherError if any leg is outside the forecast (legs_split() keeps those legs)."""
+    legs, beyond = legs_split(path, departure, speed_kn, field, wind_limit_bft, waves_limit_m, leg_km)
+    if beyond:
+        field.hour_index([g["time_utc"] for g in legs + beyond])        # raises with the clear message
+    return legs
+
+
+def legs_split(path: list[list[float]], departure: pd.Timestamp, speed_kn: float, field: Field,
+               wind_limit_bft: int = ROUGH_WIND_BFT, waves_limit_m: float = ROUGH_WAVES_M,
+               leg_km: float = LEG_KM) -> tuple[list[dict], list[dict]]:
+    """(legs with weather, legs after the end of the forecast). The second list has the same
+    leg fields without weather (status "none"), so a trip that runs past the forecast still
+    gets a route; rule R-WX-04 then warns. A departure BEFORE the forecast starts is an
+    error (RouteWeatherError): choose another departure time."""
     pts = [tools._to_km(lon, lat) for lat, lon in path]
     seg = [math.dist(p, q) for p, q in zip(pts, pts[1:])]
     total = sum(seg)
@@ -223,19 +244,29 @@ def legs_along(path: list[list[float]], departure: pd.Timestamp, speed_kn: float
     lats = [y / tools._KM_PER_DEG_LAT for _, y in xy]
     times = [departure + pd.Timedelta(hours=d / km_per_h) for d in mids]
     starts = [departure + pd.Timedelta(hours=a / km_per_h) for a, _ in bounds]
+    inside = field.covers(times)
+    after = ~inside & np.asarray(pd.DatetimeIndex(times) > field.times[-1])
+    if (~inside & ~after).any():                    # before the forecast starts
+        field.hour_index(times)                      # raises with the clear message
     idx = field.nearest(lats, lons)
-    hours = field.hour_index(times)
-    legs = []
-    for k, ((a, b), lat, lon, i, h) in enumerate(zip(bounds, lats, lons, idx, hours)):
+    hours = field.hour_index([t for t, ok in zip(times, inside) if ok]) if inside.any() else []
+    legs, beyond = [], []
+    for k, ((a, b), lat, lon, i) in enumerate(zip(bounds, lats, lons, idx)):
+        base = {"leg": k + 1, "from_km": round(float(a), 1), "to_km": round(float(b), 1),
+                "start_utc": starts[k].strftime("%Y-%m-%dT%H:%MZ"), "time_utc": times[k].strftime("%Y-%m-%dT%H:%MZ"),
+                "lat": round(float(lat), 4), "lon": round(float(lon), 4)}
+        if not inside[k]:
+            beyond.append({**base, "wind_ms": None, "wind_bft": None, "gust_ms": None, "gust_bft": None,
+                           "waves_m": None, "status": "none", "forecast_hour_utc": None,
+                           "coords": coords_between(a, b)})
+            continue
+        h = hours[len(legs)]
         wind = float(field.wind_ms[i, h])
         gust = None if field.gust_ms is None or np.isnan(field.gust_ms[i, h]) else float(field.gust_ms[i, h])
         waves = None if field.waves_m is None or np.isnan(field.waves_m[i, h]) else float(field.waves_m[i, h])
         bft = tools._beaufort(wind)
         legs.append({
-            "leg": k + 1, "from_km": round(float(a), 1), "to_km": round(float(b), 1),
-            "start_utc": starts[k].strftime("%Y-%m-%dT%H:%MZ"), "time_utc": times[k].strftime("%Y-%m-%dT%H:%MZ"),
-            "lat": round(float(lat), 4), "lon": round(float(lon), 4),
-            "wind_ms": round(wind, 1), "wind_bft": bft,
+            **base, "wind_ms": round(wind, 1), "wind_bft": bft,
             "gust_ms": None if gust is None else round(gust, 1),
             "gust_bft": None if gust is None else tools._beaufort(gust),
             "waves_m": None if waves is None else round(waves, 2),
@@ -243,7 +274,7 @@ def legs_along(path: list[list[float]], departure: pd.Timestamp, speed_kn: float
             "forecast_hour_utc": field.times[h].strftime("%Y-%m-%dT%H:%MZ"),
             "coords": coords_between(a, b),
         })
-    return legs
+    return legs, beyond
 
 
 def summarize(legs: list[dict]) -> dict:

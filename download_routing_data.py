@@ -4,6 +4,7 @@ Writes:
   data/depth_kiel_bay.npz                 EMODnet Bathymetry DTM for the routing box
   data/restricted_zones_kiel_bay.geojson  restricted / military zones from OpenStreetMap
   data/wind_farms_kiel_bay.geojson        offshore wind farm areas and turbines from OpenStreetMap
+  data/bridges_kiel_bay.geojson           lines of the fixed bridges in rule R-AIR-01, from OpenStreetMap
 
 Sources (only the routing box and the tag names are sent, no personal data):
   - Depth: EMODnet Bathymetry, coverage emodnet__mean, via its WCS as plain text
@@ -30,8 +31,13 @@ Sources (only the routing box and the tag names are sent, no personal data):
                  relation it belongs to, else "wind turbine". Near-shore turbines standing in
                  shallow water (e.g. Kappel on Lolland) are kept: they are in the water.
     Needs data/land_kiel_bay.geojson and the depth file (for the at-sea check).
+  - Bridges: OpenStreetMap via Overpass (ODbL). For each bridge of rule R-AIR-01 in
+    rules/passage_rules.yaml: the bridge ways near its `osm.near` point whose tags match
+    `osm.match`, merged into one line per bridge. The clearance is taken from the tag
+    seamark:bridge:clearance_height when a way has it (else null: the rulebook's approximate
+    hand value is used).
 
-Usage:  python download_routing_data.py [--depth-only | --zones-only | --wind-only]
+Usage:  python download_routing_data.py [--depth-only | --zones-only | --wind-only | --bridges-only]
 """
 import argparse
 import json
@@ -43,7 +49,7 @@ from datetime import datetime, timezone
 from pathlib import Path
 
 import numpy as np
-from shapely.geometry import LineString, Point, Polygon, mapping
+from shapely.geometry import LineString, MultiLineString, Point, Polygon, mapping
 from shapely.ops import polygonize, unary_union
 
 import routing
@@ -52,6 +58,7 @@ DATA = Path(__file__).resolve().parent / "data"
 DEPTH_FILE = DATA / "depth_kiel_bay.npz"
 ZONES_FILE = DATA / "restricted_zones_kiel_bay.geojson"
 WIND_FILE = DATA / routing.WIND_FILE
+BRIDGES_FILE = DATA / "bridges_kiel_bay.geojson"            # rule_checker.BRIDGES_FILE
 USER_AGENT = "marine-weather-agent (learning project)"
 
 WCS_URL = "https://ows.emodnet-bathymetry.eu/wcs"
@@ -284,20 +291,57 @@ out geom;""")
           f"ignored: {onshore['areas']} areas onshore or without an outline, {onshore['turbines']} turbines on land")
 
 
+def download_bridges():
+    import re
+    import rule_checker
+    bridges = rule_checker.rule("R-AIR-01")["parameters"]["bridges"]
+    query = "".join(f'way["bridge"]["bridge"!="no"](around:3000,{b["osm"]["near"][0]},{b["osm"]["near"][1]});'
+                    for b in bridges)
+    answer = overpass(f"[out:json][timeout:90];({query});out tags geom;")
+    ways = {e["id"]: e for e in answer["elements"] if e["type"] == "way" and e.get("geometry")}
+    features = []
+    for b in bridges:
+        near = Point(b["osm"]["near"][1], b["osm"]["near"][0])
+        hits = [e for e in ways.values()
+                if all(re.search(rx, e.get("tags", {}).get(k, "")) for k, rx in b["osm"]["match"].items())
+                and LineString([(q["lon"], q["lat"]) for q in e["geometry"]]).distance(near) < 0.05]
+        if not hits:
+            print(f"  {b['name']}: no matching OSM way; R-AIR-01 uses the rulebook point")
+            continue
+        heights = [float(e["tags"]["seamark:bridge:clearance_height"]) for e in hits
+                   if re.fullmatch(r"[0-9.]+", e["tags"].get("seamark:bridge:clearance_height", ""))]
+        features.append({"type": "Feature",
+                         "geometry": mapping(MultiLineString([[(q["lon"], q["lat"]) for q in e["geometry"]]
+                                                              for e in hits])),
+                         "properties": {"name": b["name"], "osm": [f"way/{e['id']}" for e in hits],
+                                        "clearance_m_osm": min(heights) if heights else None}})
+        print(f"  {b['name']}: {len(hits)} way(s), clearance tag: {min(heights) if heights else 'none'}")
+    BRIDGES_FILE.write_text(json.dumps({
+        "type": "FeatureCollection",
+        "properties": {"source": f"OpenStreetMap via {OVERPASS_URL}",
+                       "licence": "ODbL, (c) OpenStreetMap contributors",
+                       "fetched": datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")},
+        "features": features}, ensure_ascii=False), encoding="utf-8")
+    print(f"Wrote {BRIDGES_FILE.name}: {len(features)} of {len(bridges)} bridges")
+
+
 def main():
     parser = argparse.ArgumentParser(description=__doc__.splitlines()[0])
     parser.add_argument("--depth-only", action="store_true")
     parser.add_argument("--zones-only", action="store_true")
     parser.add_argument("--wind-only", action="store_true")
+    parser.add_argument("--bridges-only", action="store_true")
     args = parser.parse_args()
     DATA.mkdir(exist_ok=True)
-    only = args.depth_only or args.zones_only or args.wind_only
+    only = args.depth_only or args.zones_only or args.wind_only or args.bridges_only
     if args.depth_only or not only:
         download_depth()
     if args.zones_only or not only:
         download_zones()
     if args.wind_only or not only:
         download_wind_farms()
+    if args.bridges_only or not only:
+        download_bridges()
 
 
 if __name__ == "__main__":

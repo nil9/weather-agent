@@ -2,19 +2,17 @@
 
 ## Summary
 
-The forecast for the next 3 days shows steady pressure with a slight increase from 1025.8 hPa to 1026.7 hPa. The temperature will range between 2.5°C and 5.1°C, with a maximum wind speed of 8.2 m/s. There are no significant warnings.
+- **Pressure Trend**: Falling pressure of -3.7 hPa over the period.
+- **Wind Warning**: No warnings for strong winds.
+- **Falling Pressure Warning**: Falling pressure is expected over the next 3 days.
 
-## Day-by-Day Table
+## Day-by-Day Forecast
 
-| Date       | Min Temp (°C) | Max Temp (°C) | Mean Pressure (hPa) | Max Wind (m/s) |
-|------------|---------------|---------------|---------------------|----------------|
-| 2026-11-26 | 2.7           | 5.0           | 1025.8              | 8.2            |
-| 2026-11-27 | 2.5           | 5.1           | 1026.6              | 8.2            |
-| 2026-11-28 | 2.5           | 5.1           | 1026.7              | 8.2            |
-
-## Warnings
-
-- None
+| Date       | Min Temp (°C) | Max Temp (°C) | Mean Pressure (hPa) | Max Wind Speed (m/s) |
+|------------|---------------|---------------|---------------------|---------------------|
+| 2026-11-28 | -1.9          | -0.6          | 1032.5              | 5.8                 |
+| 2026-11-29 | -2.4          | -0.1          | 1029.7              | 5.9                 |
+| 2026-11-30 | -2.5          | -0.2          | 1028.8              | 5.9                 |
 
 ## Stations Used
 

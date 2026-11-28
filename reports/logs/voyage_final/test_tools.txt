@@ -1,0 +1,306 @@
+
+=== list_stations() ===
+{
+  "forecast_point": {
+    "id": "SEA",
+    "name": "Kiel Bay (open water)",
+    "lat": 54.55,
+    "lon": 10.45
+  },
+  "stations": [
+    {
+      "id": "NORTH",
+      "name": "Marstal (\u00c6r\u00f8)",
+      "lat": 54.856,
+      "lon": 10.517,
+      "distance_to_sea_point_km": 34.3
+    },
+    {
+      "id": "EAST",
+      "name": "Westermarkelsdorf (Fehmarn)",
+      "lat": 54.528,
+      "lon": 11.06,
+      "distance_to_sea_point_km": 39.4
+    },
+    {
+      "id": "SOUTH",
+      "name": "Sch\u00f6nberger Strand",
+      "lat": 54.425,
+      "lon": 10.378,
+      "distance_to_sea_point_km": 14.7
+    },
+    {
+      "id": "WEST",
+      "name": "Damp",
+      "lat": 54.586,
+      "lon": 10.017,
+      "distance_to_sea_point_km": 28.2
+    }
+  ]
+}
+
+=== get_observations('WEST', 24) ===
+{
+  "station": "WEST",
+  "period": "2026-11-24 00:00 to 2026-11-24 23:00 UTC",
+  "temperature_c": {
+    "min": 3.9,
+    "max": 11.7,
+    "mean": 8.0,
+    "latest": 6.0
+  },
+  "pressure_hpa": {
+    "min": 983.2,
+    "max": 999.3,
+    "mean": 989.2,
+    "latest": 999.3
+  },
+  "pressure_change_hpa": 3.0,
+  "pressure_tendency_3h_hpa": 5.9,
+  "wind_speed_ms": {
+    "min": 8.9,
+    "max": 16.6,
+    "mean": 13.4,
+    "latest": 9.9
+  },
+  "wind_dir_mean_deg": 235,
+  "humidity_pct": {
+    "min": 85.6,
+    "max": 99.4,
+    "mean": 92.2,
+    "latest": 90.7
+  }
+}
+
+=== check_data_quality('NORTH') ===
+{
+  "station": "NORTH",
+  "status": "OK",
+  "issues": []
+}
+
+=== check_data_quality('EAST') ===
+{
+  "station": "EAST",
+  "status": "SUSPECT",
+  "issues": [
+    "temperature_c stuck at 7.4 for 216 h (from 2026-11-16 00:00)",
+    "pressure_hpa: 12 single-hour jumps > 5.0 (largest 41.2)"
+  ]
+}
+
+=== forecast_station('WEST', 3) ===
+{
+  "station": "WEST",
+  "method": "Holt-Winters (damped trend, 24 h cycle)",
+  "daily": [
+    {
+      "date": "2026-11-25",
+      "temp_min_c": 5.4,
+      "temp_max_c": 11.6,
+      "pressure_mean_hpa": 1009.3,
+      "wind_max_ms": 10.5
+    },
+    {
+      "date": "2026-11-26",
+      "temp_min_c": 5.4,
+      "temp_max_c": 11.6,
+      "pressure_mean_hpa": 1014.3,
+      "wind_max_ms": 6.0
+    },
+    {
+      "date": "2026-11-27",
+      "temp_min_c": 5.5,
+      "temp_max_c": 11.6,
+      "pressure_mean_hpa": 1014.7,
+      "wind_max_ms": 5.9
+    }
+  ]
+}
+
+=== estimate_at_sea_point(['NORTH', 'SOUTH', 'WEST'], 3) ===
+{
+  "point": "SEA",
+  "stations_used": [
+    "NORTH",
+    "SOUTH",
+    "WEST"
+  ],
+  "stations_excluded": {},
+  "weights": {
+    "NORTH": 0.126,
+    "SOUTH": 0.688,
+    "WEST": 0.186
+  },
+  "daily": [
+    {
+      "date": "2026-11-25",
+      "temp_min_c": 6.1,
+      "temp_max_c": 12.4,
+      "pressure_mean_hpa": 1003.4,
+      "wind_max_ms": 15.0,
+      "wind_warning": "NEAR GALE (Beaufort 7, max 15.0 m/s)"
+    },
+    {
+      "date": "2026-11-26",
+      "temp_min_c": 6.2,
+      "temp_max_c": 12.4,
+      "pressure_mean_hpa": 1008.1,
+      "wind_max_ms": 13.6,
+      "wind_warning": "STRONG WIND (Beaufort 6, max 13.6 m/s)"
+    },
+    {
+      "date": "2026-11-27",
+      "temp_min_c": 6.2,
+      "temp_max_c": 12.4,
+      "pressure_mean_hpa": 1008.5,
+      "wind_max_ms": 13.5,
+      "wind_warning": "STRONG WIND (Beaufort 6, max 13.5 m/s)"
+    }
+  ],
+  "pressure_trend": {
+    "label": "rising",
+    "change_hpa": 5.1,
+    "from_hpa": 1003.4,
+    "to_hpa": 1008.5
+  },
+  "warnings": [
+    "2026-11-25: NEAR GALE (Beaufort 7, max 15.0 m/s)",
+    "2026-11-26: STRONG WIND (Beaufort 6, max 13.6 m/s)",
+    "2026-11-27: STRONG WIND (Beaufort 6, max 13.5 m/s)"
+  ]
+}
+
+=== write_report(placeholder)  (numbers missing -> error) ===
+{
+  "error": "Report rejected: these forecast numbers from estimate_at_sea_point are missing: 2026-11-25 temp_min_c=6.1, 2026-11-25 temp_max_c=12.4, 2026-11-25 pressure_mean_hpa=1003.4, 2026-11-25 wind_max_ms=15.0, 2026-11-26 temp_min_c=6.2, 2026-11-26 temp_max_c=12.4, 2026-11-26 pressure_mean_hpa=1008.1, 2026-11-26 wind_max_ms=13.6, 2026-11-27 temp_min_c=6.2, 2026-11-27 temp_max_c=12.4, 2026-11-27 pressure_mean_hpa=1008.5, 2026-11-27 wind_max_ms=13.5. Include the full day-by-day table."
+}
+
+=== write_report(full table) ===
+{
+  "saved": "reports/test_report.md",
+  "characters": 147
+}
+
+=== write_report escape attempt ===
+{
+  "error": "Path '../data/evil.md' is outside the allowed folder 'reports/'"
+}
+
+=== unknown station ===
+{
+  "error": "Unknown station 'MOON'. Valid stations: ['NORTH', 'EAST', 'SOUTH', 'WEST']"
+}
+
+=== forecast_station('EAST')  (SUSPECT -> error) ===
+{
+  "error": "Station EAST is SUSPECT (temperature_c stuck at 7.4 for 216 h (from 2026-11-16 00:00); pressure_hpa: 12 single-hour jumps > 5.0 (largest 41.2)). Its data is unreliable, so no forecast is given."
+}
+
+=== estimate_at_sea_point(['EAST'])  (nothing reliable -> error) ===
+{
+  "error": "No reliable station left: every requested station is SUSPECT (EAST). A sea-point forecast is NOT possible. Do not invent numbers: write a report saying the forecast is unavailable and why."
+}
+
+6 tool specs: ['list_stations', 'get_observations', 'check_data_quality', 'forecast_station', 'estimate_at_sea_point', 'write_report']
+
+=== get_warnings() ===
+{
+  "warnings": [
+    "2026-11-25: NEAR GALE (Beaufort 7, max 15.0 m/s)",
+    "2026-11-26: STRONG WIND (Beaufort 6, max 13.6 m/s)",
+    "2026-11-27: STRONG WIND (Beaufort 6, max 13.5 m/s)"
+  ],
+  "pressure_trend": "rising",
+  "pressure_outlook": "improving"
+}
+
+=== sail_safety('2026-11-25') ===
+{
+  "date": "2026-11-25",
+  "wind_max_ms": 15.0,
+  "beaufort": 7,
+  "pressure_trend": "rising",
+  "pressure_outlook": "improving",
+  "verdict": "not safe",
+  "reasons": [
+    "max wind 15.0 m/s = Beaufort 7; not safe from Beaufort 7",
+    "pressure is rising, so conditions are improving (this does not lower the wind-based verdict)"
+  ],
+  "thresholds_bft": {
+    "safe_up_to": 4,
+    "caution_from": 5,
+    "not_safe_from": 7
+  }
+}
+
+=== sail_safety('2026-11-26') ===
+{
+  "date": "2026-11-26",
+  "wind_max_ms": 13.6,
+  "beaufort": 6,
+  "pressure_trend": "rising",
+  "pressure_outlook": "improving",
+  "verdict": "caution",
+  "reasons": [
+    "max wind 13.6 m/s = Beaufort 6; caution applies from Beaufort 5",
+    "pressure is rising, so conditions are improving (this does not lower the wind-based verdict)"
+  ],
+  "thresholds_bft": {
+    "safe_up_to": 4,
+    "caution_from": 5,
+    "not_safe_from": 7
+  }
+}
+
+=== sail_safety('2026-11-27') ===
+{
+  "date": "2026-11-27",
+  "wind_max_ms": 13.5,
+  "beaufort": 6,
+  "pressure_trend": "rising",
+  "pressure_outlook": "improving",
+  "verdict": "caution",
+  "reasons": [
+    "max wind 13.5 m/s = Beaufort 6; caution applies from Beaufort 5",
+    "pressure is rising, so conditions are improving (this does not lower the wind-based verdict)"
+  ],
+  "thresholds_bft": {
+    "safe_up_to": 4,
+    "caution_from": 5,
+    "not_safe_from": 7
+  }
+}
+
+=== sail_safety('2030-01-01')  (unknown day -> error) ===
+{
+  "error": "Unknown day '2030-01-01'. Forecast days: ['2026-11-25', '2026-11-26', '2026-11-27']"
+}
+
+=== sail_safety with a faked falling pressure trend ===
+2026-11-25: Bft 7 -> not safe   (max wind 15.0 m/s = Beaufort 7; not safe from Beaufort 7; pressure is falling, so conditions are worsening)
+2026-11-26: Bft 6 -> not safe   (max wind 13.6 m/s = Beaufort 6; caution applies from Beaufort 5; pressure is falling, so conditions are worsening; because of the worsening, the verdict is raised one level)
+2026-11-27: Bft 6 -> not safe   (max wind 13.5 m/s = Beaufort 6; caution applies from Beaufort 5; pressure is falling, so conditions are worsening; because of the worsening, the verdict is raised one level)
+
+Beaufort checks: {0.4: 0, 5.4: 3, 7.9: 4, 8.0: 5, 10.8: 6, 13.9: 7, 33.0: 12}
+
+=== forecast_at (map clicks) ===
+default sea point, agent vs. click: IDENTICAL
+second point from cache: 1 ms
+just off SOUTH, weights: {'NORTH': 0.001, 'EAST': None, 'SOUTH': 0.998, 'WEST': 0.002}
+exactly on SOUTH (_idw_weights): {'NORTH': 0.0, 'SOUTH': 1.0, 'WEST': 0.0}
+60 km north: Outside forecast area: the nearest OK station (NORTH) is 60.9 km away (max 40 km).
+Fehmarn (only EAST nearby): Outside forecast area: the nearest OK station (SOUTH) is 44.2 km away (max 40 km).
+
+=== is_on_land ===
+PASS  default sea point: water
+PASS  Kiel city (Schreventeich): land
+PASS  open bay: water
+PASS  Fehmarn interior: land
+PASS  chat test point near WEST: water
+PASS  200 m off the coast: water
+PASS  400 m inland (within tolerance): water
+PASS  600 m inland (beyond tolerance): land
+PASS  forecast_at(Kiel): This point is on land. Marine forecast only for water.
+1000 cached checks: 0.7 ms
+land/sea: all passed

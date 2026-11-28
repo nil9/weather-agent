@@ -1,0 +1,68 @@
+# Vessel profiles for the Route tab (read by rule_checker.py). Choosing a profile fills the
+# route settings; the user can still adjust every value. Rules that depend on vessel size
+# (R-PILOT-01, R-ROUTE-T, R-SIZE-01, R-AIR-01, R-UKC-02 squat) use these values.
+#
+# ukc_policy: the margin under the keel the company / owner requires (document: "set by the
+#   company SMS"; the Nautical Institute examples range from 50 % of draught in deep water down
+#   to 1.5 % alongside). Either a fixed value in metres, or a percentage of the draft with a
+#   minimum. The margin_m route setting is computed from it in code.
+# block_coefficient: hull fullness for the Barrass squat estimate (R-UKC-02).
+# squat_in_router: the router adds the squat (Barrass, block coefficient and the route's speed)
+#   to the required depth: draft + squat + margin. Off for the small sailboat (slow, light hull:
+#   the old default routes stay the same).
+# Values are typical examples for learning, not data of a real vessel.
+
+profiles:
+  small_sailboat:
+    label: Small sailboat
+    draft_m: 2.0
+    air_draught_m: 14
+    speed_kn: 6
+    wind_limit_bft: 6
+    gust_limit_bft: 8
+    waves_limit_m: 1.5
+    ukc_policy: {type: fixed, value_m: 1.0}
+    block_coefficient: 0.40
+    dwt: null
+    squat_in_router: false
+
+  motor_yacht:
+    label: Motor yacht
+    draft_m: 1.5
+    air_draught_m: 6
+    speed_kn: 15
+    wind_limit_bft: 6
+    gust_limit_bft: 8
+    waves_limit_m: 2.0
+    ukc_policy: {type: fixed, value_m: 1.0}
+    block_coefficient: 0.45
+    dwt: null
+    squat_in_router: true
+
+  coaster:
+    label: Coaster (small cargo ship)
+    draft_m: 5.5
+    air_draught_m: 28
+    speed_kn: 11
+    wind_limit_bft: 8
+    gust_limit_bft: 10
+    waves_limit_m: 4.0
+    ukc_policy: {type: percent_of_draft, percent: 10, min_m: 1.0}
+    block_coefficient: 0.75
+    dwt: 4500
+    squat_in_router: true
+
+  large_ship:
+    label: Large ship (tanker / bulk carrier)
+    draft_m: 12.5
+    air_draught_m: 50
+    speed_kn: 14
+    wind_limit_bft: 9
+    gust_limit_bft: 11
+    waves_limit_m: 6.0
+    ukc_policy: {type: percent_of_draft, percent: 15, min_m: 2.0}
+    block_coefficient: 0.82
+    dwt: 75000
+    squat_in_router: true
+
+default: small_sailboat

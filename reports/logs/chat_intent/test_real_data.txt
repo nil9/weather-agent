@@ -1,0 +1,62 @@
+=== conversion (Kiel-Holtenau fixture) ===
+PASS  our column names
+PASS  timestamps are UTC
+PASS  forecast (MOSMIX) rows dropped
+PASS  wind km/h -> m/s
+PASS  pressure kept in hPa
+PASS  2 h gap filled (linear)
+PASS  5 h gap left empty
+PASS  regular hourly grid
+
+=== station selection ===
+PASS  candidates sorted by distance
+PASS  precipitation-only station (Koehn, no 'current' source) not a candidate
+PASS  agent gets the 4 nearest usable stations to the sea point
+PASS  station without pressure history skipped (Hohwacht)
+PASS  station with only recent hours skipped (Leuchtturm Kiel)
+PASS  another point gets ITS 4 nearest (Fehmarn first)
+PASS  same columns as data/observations.csv
+PASS  all stations end at the same hour
+
+=== cache and fallback ===
+PASS  first refresh fetches and saves
+PASS  no note for fresh data
+PASS  cache younger than 60 min: no request
+PASS  failed refresh keeps the last good data
+PASS  ... with a visible 'data from <time>' note
+PASS  no data at all -> error, no dummy fallback
+
+=== no mixing ===
+PASS  dummy content in forecast_real.json: _load_forecast_json refuses
+PASS  dummy content in forecast_real.json: forecast_at refuses
+PASS  real content in forecast_dummy.json: _load_forecast_json refuses
+PASS  real content in forecast_dummy.json: forecast_at refuses
+PASS  forecast file without data_source counts as dummy
+
+=== Open-Meteo comparison ===
+PASS  partial first day uses the same hours as our forecast
+PASS  full day = 24 hours
+PASS  Open-Meteo down, no cache -> not available
+PASS  Open-Meteo down, old cache -> values with a note
+
+=== sail_safety with Open-Meteo ===
+PASS  Open-Meteo higher -> verdict from Open-Meteo (Bft 5 = caution)
+PASS  ... and the reasons say which source
+PASS  our estimate higher -> verdict from our estimate (Bft 6 = caution)
+PASS  equal -> 'both (equal)', safe
+PASS  Open-Meteo not available -> our estimate, and it says so
+PASS  Open-Meteo Bft 7 -> not safe (falling pressure can't go higher)
+PASS  dummy: unchanged (our estimate only, no source fields)
+PASS  dummy: Open-Meteo is never fetched
+PASS  chat rejects an answer that doesn't name the source
+PASS  chat accepts an answer that names the source
+PASS  chat: 'our estimate' named via the stations
+PASS  chat (dummy): no source required
+PASS  real forecast: Open-Meteo fetched on first use, from the fixture
+
+=== separate forecast files ===
+PASS  dummy mode reads forecast_dummy.json
+PASS  real mode reads forecast_real.json
+PASS  real reports go to reports/real/
+
+all passed

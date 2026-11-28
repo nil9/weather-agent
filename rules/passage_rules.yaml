@@ -1,0 +1,295 @@
+# Passage-planning rulebook (read by rule_checker.py; code checks, the LLM only explains).
+#
+# Built from docs/Ship_Voyage_Planning.pdf ("Ship Voyage Planning: Modern Rules and Practice").
+# The "source" of each rule names the regulation or guidance AS THAT DOCUMENT NAMES IT; the
+# document itself warns it was not checked against the current consolidated texts.
+# For analysis and learning only. Not for navigation.
+#
+# Fields
+#   id          stable rule id, cited in the Route tab and in chat answers
+#   factor      what is checked
+#   source      regulation / guidance named in the document
+#   type        hard         the router never breaks it; a route that does is invalid (fail)
+#               penalty      the router may break it at a cost (penalty mode); breaking it = warn
+#               check        evaluated on the finished route: pass / warn / fail by thresholds
+#               advisory     can only warn (information the navigator must act on), never fail
+#               not_modelled cannot be checked with the project's data; "reason" says why
+#   parameters  fixed values of the rule; values that come from the Route tab are listed in
+#               "settings" (the route settings feed the rule, no duplicate settings)
+#   data        where the checked value comes from
+
+rules:
+
+  # ---------------------------------------------------------------- depth / UKC
+  - id: R-UKC-01
+    factor: Under-keel clearance (minimum depth along the route)
+    source: ISM Code (company minimum UKC policy in the SMS); Nautical Institute UKC guidance; IMO A.893(21) planning stage (safety depth)
+    type: hard
+    settings: [draft_m, margin_m]
+    parameters:
+      required_depth: draft_m + squat_m + margin_m   # margin_m = the UKC policy (vessel profile or Route tab);
+                                                     # squat_m: profiles with squat_in_router (R-UKC-02), else 0
+    data: EMODnet Bathymetry DTM (~115 m grid), sampled every 20 m along the route
+
+  - id: R-UKC-02
+    factor: Squat allowance (UKC left after squat at the planned speed)
+    source: Nautical Institute UKC guidance; squat by a Barrass-type formula (document, "Open data for modelling")
+    type: check
+    settings: [draft_m, margin_m, speed_kn]
+    parameters:
+      formula: "squat_m = Cb * V^2 / 100 (open water); x2 in named narrow passages (confined water)"
+      block_coefficient_default: 0.6       # used when the vessel profile gives none
+      warn_if: min_depth - draft - squat < margin_m
+      fail_if: min_depth - draft - squat < 0
+    data: EMODnet depth along the route; speed and Cb from the Route tab / vessel profile
+
+  - id: R-UKC-03
+    factor: Depth data resolution (tight margins)
+    source: Document, "Open data for modelling" (EMODnet too coarse to detect small shoals)
+    type: advisory
+    parameters:
+      warn_if_spare_below_m: 1.0           # min depth - required depth below this -> warn
+    data: EMODnet Bathymetry DTM
+
+  # ---------------------------------------------------------------- no-go and restricted areas
+  - id: R-ZONE-01
+    factor: No-entry areas (no-go)
+    source: IMO A.893(21) planning stage (no-go areas); ECDIS no-go marking
+    type: hard
+    parameters: {categories: [no_entry]}
+    data: OpenStreetMap / OpenSeaMap seamark restricted areas (ODbL)
+
+  - id: R-ZONE-02
+    factor: Military firing and restricted areas
+    source: IMO A.893(21) planning stage (no-go areas); document, factor "No-go and restricted areas" (military firing areas)
+    type: penalty                           # hard when the Route tab says "avoid"
+    settings: [zones, penalty_factor]
+    parameters: {categories: [firing, restricted], hard_when: "zones = block"}
+    data: OpenStreetMap / OpenSeaMap (ODbL); firing times not known, treated as always active
+
+  - id: R-ZONE-03
+    factor: Military exercise areas (passage allowed)
+    source: Document, factor "No-go and restricted areas"; DMA Niord firing warnings (not fetched)
+    type: advisory
+    parameters: {categories: [exercise]}
+    data: OpenStreetMap / OpenSeaMap (ODbL)
+
+  - id: R-WIND-01
+    factor: Offshore wind farms and turbines
+    source: Document, factor "No-go and restricted areas" (wind farms, with clearing distances)
+    type: penalty                           # hard when the Route tab says "avoid"
+    settings: [wind_farms, turbine_radius_m, penalty_factor]
+    parameters: {categories: [wind_farm], hard_when: "wind_farms = block"}
+    data: OpenStreetMap power=plant / generator, seamark wind farms (ODbL)
+
+  # ---------------------------------------------------------------- clearing distances
+  - id: R-BUF-01
+    factor: Clearing distance from land (open water)
+    source: IMO A.893(21) planning stage (clearing distances, safety contour)
+    type: hard
+    settings: [land_buffer_m]
+    parameters: {raster_tolerance_m: 70}
+    data: Natural Earth 1:10m land + EMODnet land pixels
+
+  - id: R-BUF-02
+    factor: Clearing distance from closed zones
+    source: IMO A.893(21) planning stage (no-go areas with clearing distances)
+    type: hard
+    settings: [zone_buffer_m]
+    data: OpenStreetMap zones (ODbL)
+
+  - id: R-COLREG-09
+    factor: Narrow channels (reduced clearance in a named narrow passage)
+    source: COLREGs Rule 9 (narrow channels)
+    type: check                             # warn: keep to the starboard side of the fairway
+    settings: [passage_land_buffer_m, passage_zone_buffer_m]
+    parameters:
+      passages: [Fehmarnsund, "Kiel Fjord (Friedrichsort narrows)", Guldborgsund, "Storstrøm / Masnedsund",
+                 "Ulvsund / Bøgestrøm", Grønsund]
+    data: routing.NARROW_PASSAGES (boxes drawn from the depth data)
+
+  - id: R-AIR-01
+    factor: Air draught under fixed bridges
+    source: Document, factor "Air draught" (clearance under bridges at forecast water level)
+    type: check
+    settings: [air_draught_m]
+    parameters:
+      warn_margin_m: 2.0                    # clearance - air draught below this -> warn
+      pass_within_km: 0.05                  # the route passes under a bridge line this close
+      pass_within_km_point: 0.6             # fallback without the bridge file: distance to the point
+      # Each bridge: its line comes from OpenStreetMap (download_routing_data.py --bridges-only
+      # -> data/bridges_kiel_bay.geojson): the OSM ways near `osm.near` whose tags match
+      # `osm.match` (regular expressions). The clearance is taken from the OSM tag
+      # seamark:bridge:clearance_height if a matching way has it; none of these bridges has it
+      # (checked 2026-11-27), so clearance_m is a hand value: APPROXIMATE - VERIFY ON THE CHART.
+      # clearance_m null: no value known -> the rule warns "clearance unknown".
+      bridges:
+        - name: Fehmarnsund Bridge
+          lat: 54.4005
+          lon: 11.1118
+          clearance_m: 23
+          osm: {near: [54.400, 11.112], match: {"bridge:name": "Fehmarnsund"}}
+        - name: Storstrøm Bridge (new)
+          lat: 54.972
+          lon: 11.871
+          clearance_m: 26
+          osm: {near: [54.972, 11.871], match: {name: "Ringsted-Femern|Storstrømsvej|Ny Brovej"}}
+        - name: Storstrøm Bridge (old, 1937)
+          lat: 54.9654
+          lon: 11.8831
+          clearance_m: null
+          osm: {near: [54.965, 11.883], match: {name: "^Sydbanen$", start_date: "^1937"}}
+        - name: Farø Bridge (south, Falster–Farø)
+          lat: 54.9439
+          lon: 11.9751
+          clearance_m: 26
+          osm: {near: [54.944, 11.975], match: {name: "Sydmotorvejen", "bridge:structure": "cable-stayed"}}
+        - name: Farø Bridge (north, Farø–Zealand)
+          lat: 54.9636
+          lon: 11.9979
+          clearance_m: null
+          osm: {near: [54.964, 11.998], match: {name: "Sydmotorvejen", "bridge:structure": "beam"}}
+        - name: Queen Alexandrine Bridge
+          lat: 54.9894
+          lon: 12.1647
+          clearance_m: 26
+          osm: {near: [54.989, 12.165], match: {name: "^Kostervej$"}}
+    data: bridge lines from OpenStreetMap (ODbL), data/bridges_kiel_bay.geojson; clearances approximate hand values
+
+  # ---------------------------------------------------------------- weather
+  - id: R-WX-01
+    factor: Wind along the route (sustained, at each leg's passing time)
+    source: Document, factor "Wind, waves, swell" (heavy-weather limits in the SMS); weather routing
+    type: check
+    settings: [wind_limit_bft]
+    parameters: {caution_from_bft: 5, fail_if: "any leg above wind_limit_bft", warn_if: "any leg from caution_from_bft"}
+    data: Open-Meteo Forecast (real) / dummy forecast; legs of 3 km
+
+  - id: R-WX-02
+    factor: Gusts along the route
+    source: Document, factor "Wind, waves, swell" (heavy-weather limits in the SMS)
+    type: check
+    settings: [gust_limit_bft]
+    parameters: {fail_if: "any leg's gusts above gust_limit_bft", warn_if: "any leg's gusts at gust_limit_bft"}
+    data: Open-Meteo Forecast wind_gusts_10m (real); not in the dummy data (not_modelled there)
+
+  - id: R-WX-03
+    factor: Waves along the route
+    source: Document, factor "Wind, waves, swell"; Open-Meteo Marine API (document, "Open data")
+    type: check
+    settings: [waves_limit_m]
+    parameters: {caution_from_m: 1.0, fail_if: "any leg above waves_limit_m", warn_if: "any leg from caution_from_m"}
+    data: Open-Meteo Marine wave_height (real); not in the dummy data (not_modelled there)
+
+  - id: R-WX-04
+    factor: Forecast covers the whole passage (ETD to ETA)
+    source: IMO A.893(21) execution stage (update the plan with the latest weather); SOLAS V/5, V/31
+    type: check
+    parameters: {warn_if: "any leg is after the end of the forecast (those legs are listed)"}
+    data: route weather (departure time from the Route tab)
+
+  # ---------------------------------------------------------------- vessel size
+  - id: R-PILOT-01
+    factor: Pilot recommended for deep-draught ships in the Danish straits (Route T)
+    source: IMO recommendation (document, "Pilotage in Route T"); DMA pilotage
+    type: advisory
+    settings: [draft_m]
+    parameters: {draft_from_m: 11.0}
+    data: vessel profile / Route tab draft
+
+  - id: R-SIZE-01
+    factor: Baltimax size limit (draught, air draught)
+    source: Document, "Baltimax size limit" (draught about 15.4 m; air draught 65 m, Great Belt East Bridge)
+    type: advisory
+    settings: [draft_m, air_draught_m]
+    parameters: {max_draft_m: 15.4, max_air_draught_m: 65.0}
+    data: vessel profile / Route tab
+
+  - id: R-ROUTE-T
+    factor: Large ships directed to Route T (over 40,000 dwt)
+    source: IMO MSC resolutions; HELCOM Recommendation 41/2; DMA, Navigation through Danish Waters
+    type: advisory
+    parameters: {dwt_from: 40000}
+    data: vessel profile (dwt); the Route T track itself is not modelled
+
+  # ---------------------------------------------------------------- contingency and area
+  - id: R-CONT-01
+    factor: Port of refuge within reach of every leg
+    source: "IMO A.893(21) (contingency: abort points, emergency anchorages, ports of refuge)"
+    type: check
+    parameters: {warn_if_farther_than_nm: 15}
+    data: harbour list in routing.PLACES (approximate positions), straight-line distance
+
+  - id: R-AREA-01
+    factor: Routing-area limits (data coverage)
+    source: Project limit (data downloaded for 9.8-12.8 E, 54.15-55.3 N)
+    type: advisory
+    parameters: {warn_within_km: 2.0}
+    data: routing.ROUTE_BBOX
+
+  # ---------------------------------------------------------------- not modelled
+  - id: R-ENC-01
+    factor: Official charts / ENCs and Notices to Mariners
+    source: SOLAS V/27; IHO S-57 / S-100
+    type: not_modelled
+    reason: Official ENCs are licensed and not available; the route uses EMODnet depth and Natural Earth coastline.
+
+  - id: R-NTM-01
+    factor: Navigational warnings and firing notices
+    source: SOLAS V/5, V/31; DMA Niord (Danish waters only)
+    type: not_modelled
+    reason: Live warnings are not fetched; outside Denmark they are not openly available. Firing areas count as always active.
+
+  - id: R-AIS-01
+    factor: Traffic density (crossing ferries, fishing, convergence points)
+    source: Document, "Traffic density"; COLREGs Rule 5 (lookout)
+    type: not_modelled
+    reason: Live AIS is usually paid; historical density maps are not in the project.
+
+  - id: R-ICE-01
+    factor: Ice and winter navigation
+    source: National traffic restrictions (Finland, Sweden); SMHI / FMI ice charts
+    type: not_modelled
+    reason: No ice data in the project.
+
+  - id: R-CUR-01
+    factor: Currents and water level (set and drift, effect on UKC)
+    source: Document, factor "Currents and water level"; Copernicus Marine Baltic physics
+    type: not_modelled
+    reason: No current or sea-level forecast in the project; UKC uses charted-like depth without water level.
+
+  - id: R-TSS-01
+    factor: Traffic separation schemes and deep-water routes
+    source: COLREGs Rule 10; IMO Ships' Routeing; HELCOM routeing dataset
+    type: not_modelled
+    reason: No TSS / deep-water route polygons in the project (HELCOM data is non-commercial and not downloaded).
+
+  - id: R-PILOT-02
+    factor: Compulsory pilotage areas and pilot boarding points
+    source: National pilotage acts; IMO recommendations
+    type: not_modelled
+    reason: No pilotage polygons or boarding points in the project (only the draught advisory R-PILOT-01).
+
+  - id: R-REP-01
+    factor: Mandatory reporting and VTS (BELTREP, SOUNDREP, GOFREP)
+    source: SOLAS V/11, V/12; IMO MSC.332(90)
+    type: not_modelled
+    reason: Reporting lines are not modelled; BELTREP / SOUNDREP / GOFREP areas lie outside the routing area.
+
+  - id: R-VIS-01
+    factor: Visibility and fog (safe speed)
+    source: COLREGs Rule 19, Rule 6
+    type: not_modelled
+    reason: Visibility is not fetched from the weather source yet.
+
+  - id: R-ENV-01
+    factor: Emission control and special areas (fuel plan)
+    source: MARPOL Annexes I, V, VI (the Baltic is a special area and a SOx / NOx ECA)
+    type: not_modelled
+    reason: Fuel and emissions are not part of the route; the whole routing area lies in the Baltic ECA.
+
+  - id: R-SEC-01
+    factor: Security and GNSS interference
+    source: ISPS Code; flag-state advisories
+    type: not_modelled
+    reason: No security or GNSS-interference data in the project.

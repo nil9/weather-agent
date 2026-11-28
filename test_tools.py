@@ -1,7 +1,10 @@
 """Call each tool once and print the JSON it returns (no LLM involved)."""
 import json
 
+import clock
 import tools
+
+clock.freeze_for_tests()    # "now" is fixed: the tests give the same result on any day
 
 
 def show(title, result):

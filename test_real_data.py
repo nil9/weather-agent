@@ -11,12 +11,14 @@ from pathlib import Path
 
 import pandas as pd
 
+import clock
 import real_data
 import tools
 
 FIX = real_data.FIXTURES_DIR
 INFO = json.loads((FIX / "fixture_info.json").read_text())
 NOW = pd.Timestamp(INFO["recorded_at"])          # "now" when the fixtures were recorded
+clock.freeze(NOW)                                # and code that asks for "now" gets the same time
 SEA = INFO["sea_point"]
 
 failures = 0

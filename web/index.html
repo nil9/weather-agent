@@ -204,6 +204,7 @@
     border: 1px solid #4a4020; background: #2a2412; border-radius: 8px; padding: 6px 10px;
   }
 
+  .route-form .dummy-time { color: var(--yellow); font-weight: 600; font-size: 12px; }
   .route-form { display: flex; flex-wrap: wrap; align-items: center; gap: 8px; margin-top: 10px; font-size: 13px; }
   .route-form select {
     background: var(--bg); color: var(--text); border: 1px solid var(--line);
@@ -218,7 +219,17 @@
   table.why tr.main td { color: var(--orange); }
   table.legs td.st { font-weight: 700; }
   table.legs td.green { color: #3ddc97; } table.legs td.yellow { color: var(--yellow); } table.legs td.red { color: var(--bad); }
+  table.legs tr.rule-fail td { color: var(--bad); } table.legs tr.rule-warn td:nth-child(3) { color: var(--yellow); }
   .route-result .warn { color: var(--orange); margin-top: 4px; font-size: 13px; }
+  table.legs td.none { color: var(--muted); }
+  /* Route not possible: a red box at the top of the Route tab, headline first */
+  .route-error { border: 1px solid var(--bad); background: rgba(255, 93, 93, .12); border-radius: 8px;
+    padding: 10px 12px; margin-bottom: 10px; scroll-margin-top: 12px; }
+  .route-error .headline { color: var(--bad); font-weight: 700; font-size: 15px; }
+  .route-error .details { font-size: 12px; margin-top: 4px; overflow-wrap: anywhere; }
+  .route-error .tip { color: var(--muted); font-size: 12px; margin-top: 6px; }
+  .fail-marker { display: grid; place-items: center; width: 22px; height: 22px; border-radius: 50%;
+    background: var(--bad); color: #fff; border: 2px solid #07131d; font: 700 15px/1 system-ui, sans-serif; }
   .route-form input {
     width: 70px; background: var(--bg); color: var(--text); border: 1px solid var(--line);
     border-radius: 8px; padding: 6px 8px; font: inherit;
@@ -253,12 +264,21 @@
     </section>
 
     <section id="view-route" role="tabpanel" aria-labelledby="tab-route" hidden>
+      <div class="route-error" id="route-error" role="alert" hidden></div>
       <div class="hint" id="route-hint">Click the start on the map, then the destination.</div>
+      <form class="route-form" id="route-profile-form">
+        <label for="route-profile">Vessel</label>
+        <select id="route-profile" title="A vessel profile (rules/vessel_profiles.yaml) fills the settings below; you can still change them">
+          <option value="small_sailboat" selected>Small sailboat</option>
+        </select>
+        <span class="meta" id="route-profile-note"></span>
+      </form>
       <form class="route-form" id="route-form">
         <label for="route-speed">Speed</label>
         <input id="route-speed" type="number" min="1" max="40" step="0.5" value="6"> knots
         <label for="route-departure">Departure</label>
         <input id="route-departure" type="datetime-local" style="width: 190px">
+        <span class="meta" id="route-clock"></span>
       </form>
       <form class="route-form" id="route-weather-form">
         <label for="route-variant">Route</label>
@@ -270,12 +290,18 @@
         <input id="route-wind-limit" type="number" min="1" max="12" step="1" value="6">
         <label for="route-waves-limit">or waves</label>
         <input id="route-waves-limit" type="number" min="0.1" max="10" step="0.1" value="1.5"> m
+        <label for="route-gust-limit">gusts above Bft</label>
+        <input id="route-gust-limit" type="number" min="1" max="12" step="1" value="8"
+               title="Rule R-WX-02: gusts above this Beaufort fail the rule check">
       </form>
       <form class="route-form" id="route-boat">
         <label for="route-draft">Draft</label>
-        <input id="route-draft" type="number" min="0.3" max="10" step="0.1" value="2.0"> m
+        <input id="route-draft" type="number" min="0.3" max="20" step="0.1" value="2.0"> m
         <label for="route-margin">+ margin</label>
         <input id="route-margin" type="number" min="0" max="5" step="0.1" value="1.0"> m
+        <label for="route-air-draught">air draught</label>
+        <input id="route-air-draught" type="number" min="0.5" max="80" step="0.5" value="14"
+               title="Height above the waterline (mast); rule R-AIR-01 checks it under fixed bridges"> m
       </form>
       <form class="route-form" id="route-buffers">
         <label for="route-land-buffer">Keep from land</label>
@@ -310,6 +336,8 @@
       </form>
       <div class="route-result" id="route-result" aria-live="polite"></div>
       <div class="route-result" id="route-legs" aria-live="polite"></div>
+      <div class="route-result" id="route-rules" aria-live="polite"></div>
+      <div class="route-result" id="route-candidates" aria-live="polite"></div>
       <div class="route-result" id="route-why" aria-live="polite"></div>
       <div class="note">Shortest water route on a 0.25 km grid: land (Natural Earth), water depth for the
         draft plus margin (blue hatched = too shallow; depth: EMODnet Bathymetry, CC BY 4.0), restricted
@@ -883,6 +911,17 @@ async function ask(question) {
       // What the answer is about ("Along your route" / "Sea point: …"), above the text.
       msg.prepend(el("span", "scope", body.scope.join(" · ")));
     }
+    if (body.choices && body.choices.length) {
+      // The chat asks back (unclear intent): each meaning is a chip that asks it.
+      const choices = el("div", "chips");
+      body.choices.forEach(q => {
+        const chip = el("button", null, q);
+        chip.type = "button";
+        chip.addEventListener("click", () => ask(q));
+        choices.append(chip);
+      });
+      msg.append(choices);
+    }
     if (body.safety.length) {
       const badges = el("div", "badges");
       body.safety.forEach(s => badges.append(el("span", "badge " + VERDICT_COLOR[s.verdict],
@@ -915,7 +954,9 @@ async function ask(question) {
 function updateChatHeader() {
   const name = currentData ? pointName(currentData) : "…";
   document.getElementById("chat-point").textContent = "Answering for: " + (routeRequest && lastRoute
-    ? `Your route: ${lastRoute.start.name} → ${lastRoute.end.name} (weather along it; other questions: ${name})`
+    ? `Your route: ${lastRoute.start.name} → ${lastRoute.end.name}` +
+      (routeRequest.candidate ? ` (${routeRequest.candidate} candidate)` : "") +
+      ` (weather along it; other questions: ${name})`
     : name);
 }
 
@@ -959,7 +1000,7 @@ let routeRequest = null;              // the planned route (points + settings), 
 // silently replaced (earlier, 0 for the penalty factor quietly became 10).
 const ROUTE_INPUTS = [
   ["route-speed", "speed_kn", 1, 40, "Speed (knots)"],
-  ["route-draft", "draft_m", 0.3, 10, "Draft (m)"],
+  ["route-draft", "draft_m", 0.3, 20, "Draft (m)"],
   ["route-margin", "margin_m", 0, 5, "Safety margin (m)"],
   ["route-land-buffer", "land_buffer_m", 0, 3000, "Land buffer (m)"],
   ["route-zone-buffer", "zone_buffer_m", 0, 5000, "Zone buffer (m)"],
@@ -969,18 +1010,30 @@ const ROUTE_INPUTS = [
   ["route-turbine-radius", "turbine_radius_m", 50, 2000, "Turbine radius (m)"],
   ["route-wind-limit", "wind_limit_bft", 1, 12, "Wind limit (Bft)"],
   ["route-waves-limit", "waves_limit_m", 0.1, 10, "Wave limit (m)"],
+  ["route-gust-limit", "gust_limit_bft", 1, 12, "Gust limit (Bft)"],
+  ["route-air-draught", "air_draught_m", 0.5, 80, "Air draught (m)"],
 ];
 
-// Departure: local time in the form, sent as UTC (default: now).
-(function initDeparture() {
-  const now = new Date(Date.now() - new Date().getTimezoneOffset() * 60000);
-  document.getElementById("route-departure").value = now.toISOString().slice(0, 16);
-})();
+// Departure: local time in the form, sent as UTC. Default: "now" from the server's clock
+// (/api/clock): the real time, or for dummy data the dummy calendar, shown with a clear label.
+function setDeparture(when) {
+  const local = new Date(when.getTime() - when.getTimezoneOffset() * 60000);
+  document.getElementById("route-departure").value = local.toISOString().slice(0, 16);
+}
+setDeparture(new Date());
+const clockReady = fetch("/api/clock").then(r => r.ok ? r.json() : null).then(info => {
+  if (!info) return;
+  setDeparture(new Date(info.now_utc));
+  const note = document.getElementById("route-clock");
+  note.textContent = info.label || "";
+  note.classList.toggle("dummy-time", !!info.dummy);
+}).catch(() => {});
 
 class SettingsError extends Error {}
 
 function routeSettings() {
   const settings = { zones: document.getElementById("route-zones").value,
+                     profile: document.getElementById("route-profile").value,
                      wind_farms: document.getElementById("route-wind-farms").value,
                      weather: document.getElementById("route-variant").value }, errors = [];
   const dep = new Date(document.getElementById("route-departure").value);
@@ -1010,9 +1063,49 @@ function etaText(hours) {
 }
 
 function routeMarker(latlng, label) {
-  L.circleMarker(latlng, { radius: 7, color: "#07131d", weight: 2, fillColor: "#ffd166", fillOpacity: 1 })
+  return L.circleMarker(latlng, { radius: 7, color: "#07131d", weight: 2, fillColor: "#ffd166", fillOpacity: 1 })
     .bindTooltip(label, { permanent: true, direction: "right", offset: [8, 0], className: "label" })
     .addTo(routeLayer);
+}
+
+// A point the route can't use: a red × with a popup that says why (short reason from the server).
+const FAIL_ICON = L.divIcon({ className: "", html: '<div class="fail-marker" aria-hidden="true">×</div>',
+                              iconSize: [22, 22], iconAnchor: [11, 11], popupAnchor: [0, -10] });
+
+function failedMarker(latlng, label, reason) {
+  const m = L.marker(latlng, { icon: FAIL_ICON, title: `${label}: ${reason}`, keyboard: true })
+    .bindTooltip(label, { permanent: true, direction: "right", offset: [12, 0], className: "label" })
+    .bindPopup(el("div", "error", reason), { autoClose: false, closeOnClick: false })
+    .addTo(routeLayer);
+  m.openPopup();
+  return m;
+}
+
+const ERROR_TIP = {
+  shallow: "Try a smaller vessel profile or click in deeper water.",
+  cut_off: "Try a smaller vessel profile or click in deeper water.",
+  land: "Click in the water.",
+  zone: "Click outside the zone, or set the zones to \"penalty\" in the settings.",
+  zone_buffer: "Click farther from the zone, or lower the zone buffer.",
+  turbine: "Click farther from the turbines, or lower the turbine radius.",
+  land_buffer: "Click farther from land, or lower the land buffer.",
+  area: "Click inside the dashed boundary.",
+};
+const reduceMotion = window.matchMedia("(prefers-reduced-motion: reduce)").matches;
+
+// The red box at the top of the Route tab: short headline, details below, a hint; scrolled into view.
+function showRouteError(message, problem) {
+  const box = document.getElementById("route-error");
+  box.replaceChildren();
+  if (!message) { box.hidden = true; return; }
+  const p = problem || {};
+  const who = p.which === "start" ? "Start" : p.which === "end" ? "Destination" : null;
+  const headline = p.short ? (who ? `${who}: ${p.short}` : p.short)
+                           : "Route not possible: " + message.split(/[.:](\s|$)/)[0];
+  box.append(el("div", "headline", headline), el("div", "details", message),
+             el("div", "tip", ERROR_TIP[p.kind] || "Try a smaller vessel profile or click in deeper water."));
+  box.hidden = false;
+  box.scrollIntoView({ behavior: reduceMotion ? "auto" : "smooth", block: "nearest" });
 }
 
 const km = v => v === null || v === undefined ? "–" : `${Math.round(v * 1000)} m`;
@@ -1020,14 +1113,15 @@ const km = v => v === null || v === undefined ? "–" : `${Math.round(v * 1000)}
 function showRouteResult() {
   const box = document.getElementById("route-result");
   box.replaceChildren();
-  if (!lastRoute) { showLegs(); showWhy(); return; }
+  if (!lastRoute) { showLegs(); showRules(); showCandidatesButton(); showWhy(); return; }
   const r = lastRoute, speed = routeSpeed();
   if (routeRequest) routeRequest.speed_kn = speed;
   box.append(el("div", "big", `${r.distance_km} km · ${r.distance_nm} nm`));
   box.append(el("div", null, `ETA ${etaText(r.distance_nm / speed)} at ${speed} knots`));
   const depth = el("div", "depth");
   depth.append(el("strong", null, `Min depth along route: ${r.min_depth_m} m`),
-               ` (needs ≥ ${r.required_depth_m} m for ${r.settings.draft_m} m draft + ${r.settings.margin_m} m)`);
+               ` (needs ≥ ${r.required_depth_m} m for ${r.settings.draft_m} m draft` +
+               (r.settings.squat_m ? ` + ${r.settings.squat_m} m squat` : "") + ` + ${r.settings.margin_m} m)`);
   box.append(depth);
   box.append(el("div", null,
     `Keeps ≥ ${km(r.min_land_distance_km)} from land (buffer ${r.settings.land_buffer_m} m)` +
@@ -1043,6 +1137,7 @@ function showRouteResult() {
     box.append(el("div", "meta", "Passes exercise area (passage allowed): " + r.exercise_areas_crossed.join(", ")));
   }
   if (r.via && r.via.length) box.append(el("div", null, "Via: " + r.via.join(" → ")));
+  if (r.weather_error) box.append(el("div", "warn", "⚠ No weather along the route: " + r.weather_error));
   if (r.passage_warning) box.append(el("div", "warn", "⚠ " + r.passage_warning));
   if (r.alternative) {
     const a = r.alternative;
@@ -1056,7 +1151,273 @@ function showRouteResult() {
     `Start snapped ${r.start.snap_km} km to usable water, destination ${r.end.snap_km} km (dashed). ` +
     `Grid ${r.cell_km} km.`));
   showLegs();
+  showRules();
+  showCandidatesButton();
   showWhy();
+}
+
+// ---------------------------------------------------------------- candidates and passage plan
+// /api/route_candidates streams one JSON line per candidate (progress), then the recommendation
+// (scored in code). The user can pick any candidate; its passage plan and GPX come from
+// /api/passage_plan(.gpx). Candidate lines on the map: thin, the chosen one bold.
+const candidateLayer = L.layerGroup().addTo(map);
+let candidateRun = 0, chosenKind = null, lastCandidates = null;
+const CANDIDATE_COLOR = { shortest: "#8aa4b8", balanced: "#c38bff", safest: "#3ddc97" };
+
+function showCandidatesButton() {
+  const box = document.getElementById("route-candidates");
+  box.replaceChildren();
+  candidateLayer.clearLayers();
+  lastCandidates = null;
+  chosenKind = null;
+  if (!lastRoute || !routeRequest) return;
+  const button = el("button", "point-btn", "Compare route candidates");
+  button.type = "button";
+  button.addEventListener("click", loadCandidates);
+  box.append(el("h3", null, "Recommendation"), button,
+             el("div", "meta", "Shortest, balanced (weather-aware) and safest route, each checked against the rules."));
+}
+
+async function loadCandidates() {
+  const run = ++candidateRun;
+  const box = document.getElementById("route-candidates");
+  const progress = el("div", "meta", "Computing candidates…");
+  box.replaceChildren(el("h3", null, "Recommendation"), progress);
+  const request = routeRequest;
+  try {
+    const r = await fetch("/api/route_candidates?" + new URLSearchParams(request));
+    if (!r.ok) throw new Error((await r.json()).detail || r.statusText);
+    const reader = r.body.getReader(), decoder = new TextDecoder();
+    let buffer = "", result = null;
+    for (;;) {
+      const { value, done } = await reader.read();
+      if (done) break;
+      buffer += decoder.decode(value, { stream: true });
+      let nl;
+      while ((nl = buffer.indexOf("\n")) >= 0) {
+        const event = JSON.parse(buffer.slice(0, nl));
+        buffer = buffer.slice(nl + 1);
+        if (run !== candidateRun) return;
+        if (event.type === "candidate") {
+          progress.textContent = `Candidate ${event.index}/${event.of} (${event.label}) done after ${event.seconds} s` +
+            (event.duplicate_of ? ` — same route as ${event.duplicate_label}` : event.error ? ` — not possible` : "");
+        } else result = event;
+      }
+    }
+    if (!result) throw new Error("no result");
+    if (result.error) throw new Error(result.error);
+    lastCandidates = { result, request };
+    chosenKind = result.recommended || result.least_bad;
+    showCandidates();
+  } catch (err) {
+    if (run === candidateRun) progress.textContent = "Candidates not available: " + err.message;
+  }
+}
+
+function showCandidates() {
+  const { result } = lastCandidates;
+  const box = document.getElementById("route-candidates");
+  box.replaceChildren(el("h3", null, "Recommendation"));
+  box.append(el("div", result.recommended ? "meta" : "warn", result.recommended
+    ? `Recommended: ${result.candidates.find(c => c.kind === result.recommended).label} (${result.rule}).`
+    : `No candidate passes every rule; least bad: ${result.candidates.find(c => c.kind === result.least_bad).label} (not recommended).`));
+  // Always all three columns (shortest, balanced, safest): a duplicate says which route it
+  // equals, a candidate that couldn't be calculated says why.
+  const columns = result.rows || result.candidates;
+  const table = el("table", "legs");
+  const head = el("tr");
+  head.append(el("th", null, ""));
+  columns.forEach(c => head.append(el("th", null,
+    (c.kind === result.recommended ? "★ " : "") + c.label.split(" (")[0])));
+  table.append(head);
+  const rows = [
+    ["Distance", c => `${c.distance_km} km / ${c.distance_nm} nm`],
+    ["ETA", c => c.eta_text],
+    ["Worst wind", c => c.worst_wind_bft === null ? "–" : `Bft ${c.worst_wind_bft}` + (c.worst_gust_bft !== null ? ` (gusts ${c.worst_gust_bft})` : "")],
+    ["Worst waves", c => c.worst_waves_m === null ? "–" : `${c.worst_waves_m} m`],
+    ["Min UKC", c => `${c.min_ukc_m} m`],
+    ["Failed rules", c => c.fails.length ? c.fails.join(", ") : "none"],
+    ["Warnings", c => `${c.warnings.length}` + (c.warnings.length ? ` (${c.warnings.join(", ")})` : "")],
+    ["", c => c],
+  ];
+  rows.forEach(([label, value], i) => {
+    const tr = el("tr");
+    tr.append(el("td", null, label));
+    columns.forEach(c => {
+      if (c.duplicate_of || c.error) {             // no own route: the reason in the first row
+        const text = i ? "" : c.duplicate_of ? `same route as ${c.duplicate_label}` : `not possible: ${c.short || c.error}`;
+        tr.append(el("td", c.error && !i ? "error" : "meta", text));
+        return;
+      }
+      if (label) { tr.append(el("td", null, String(value(c)))); return; }
+      const td = el("td");
+      const b = el("button", "point-btn", c.kind === chosenKind ? "chosen" : "Use this");
+      b.type = "button";
+      b.disabled = c.kind === chosenKind;
+      b.addEventListener("click", () => { chosenKind = c.kind; showCandidates(); });
+      td.append(b);
+      tr.append(td);
+    });
+    table.append(tr);
+  });
+  box.append(table);
+  result.reasons.forEach(text => box.append(el("div", "meta", text)));
+  if (routeRequest === lastCandidates.request) {
+    routeRequest.candidate = chosenKind;            // the chat explains the chosen candidate
+    updateChatHeader();
+  }
+  candidateLayer.clearLayers();
+  result.candidates.forEach(c => L.polyline(c.path, { color: CANDIDATE_COLOR[c.kind] || "#fff",
+    weight: c.kind === chosenKind ? 4 : 2, opacity: c.kind === chosenKind ? 0.95 : 0.6,
+    dashArray: c.kind === chosenKind ? null : "3 5" }).bindTooltip(c.label).addTo(candidateLayer));
+  loadPlan();
+}
+
+async function loadPlan() {
+  const { request } = lastCandidates;
+  const kind = chosenKind;
+  const box = document.getElementById("route-candidates");
+  const planBox = el("div");
+  planBox.append(el("div", "meta", "Loading the passage plan…"));
+  box.append(planBox);
+  try {
+    const q = new URLSearchParams({ ...request, kind });
+    const r = await fetch("/api/passage_plan?" + q);
+    const plan = await r.json();
+    if (!r.ok) throw new Error(plan.detail || r.statusText);
+    if (kind !== chosenKind) return;
+    planBox.replaceChildren(el("h3", null, `Passage plan: ${plan.label}`));
+    planBox.append(el("div", null, `${plan.start.name} → ${plan.end.name}: ${plan.distance_nm} nm, ETA ${plan.eta_text} ` +
+                               `at ${plan.speed_kn} kn, departure ${plan.departure_utc.slice(0, 16).replace("T", " ")} UTC; ` +
+                               `min UKC ${plan.min_ukc_m} m` + (plan.via.length ? `; via ${plan.via.join(" → ")}` : "")));
+    const rs = plan.rule_summary;
+    planBox.append(el("div", rs.fails.length ? "warn" : "meta",
+      `Rule check: ${rs.counts.fail} failed${rs.fails.length ? " (" + rs.fails.join(", ") + ")" : ""}, ` +
+      `${rs.counts.warn} warnings${rs.warnings.length ? " (" + rs.warnings.join(", ") + ")" : ""}.`));
+    const wps = el("table", "legs");
+    const wh = el("tr");
+    ["WP", "Position", "nm", "ETA UTC", "Course", "Nearest port"].forEach(h => wh.append(el("th", null, h)));
+    wps.append(wh);
+    plan.waypoints.forEach(w => {
+      const tr = el("tr");
+      [w.wp, `${w.lat.toFixed(4)}° N ${w.lon.toFixed(4)}° E`, w.distance_nm, w.eta_utc.slice(11, 16),
+       w.course_to_next_deg === null ? "–" : `${String(w.course_to_next_deg).padStart(3, "0")}°`,
+       `${w.nearest_port} (${w.nearest_port_nm} nm)`].forEach(v => tr.append(el("td", null, String(v))));
+      wps.append(tr);
+    });
+    planBox.append(el("div", "meta", "Waypoints"), wps);
+    if (plan.legs.length) {
+      const lt = el("table", "legs");
+      const lh = el("tr");
+      ["Leg", "Time UTC", "Wind", "Gusts", "Waves", "Min UKC", "Port of refuge"].forEach(h => lh.append(el("th", null, h)));
+      lt.append(lh);
+      plan.legs.forEach(g => {
+        const tr = el("tr");
+        [g.leg, g.time_utc.slice(11, 16), g.status === "none" ? "no forecast" : `Bft ${g.wind_bft}`,
+         g.gust_bft === null ? "–" : `Bft ${g.gust_bft}`,
+         g.waves_m === null ? "–" : `${g.waves_m} m`, `${g.min_ukc_m} m`, `${g.port_of_refuge} (${g.port_of_refuge_nm} nm)`]
+          .forEach(v => tr.append(el("td", null, String(v))));
+        lt.append(tr);
+      });
+      planBox.append(el("div", "meta", "Legs (weather at the passing time)"), lt);
+      if (plan.no_forecast_legs && plan.no_forecast_legs.length) {
+        const n = plan.no_forecast_legs;
+        planBox.append(el("div", "warn", `No forecast for legs ${n[0]}–${n[n.length - 1]}: the forecast ends ` +
+          `${plan.forecast_end_utc.slice(0, 16).replace("T", " ")} UTC (R-WX-04 warns).`));
+      }
+    } else if (plan.weather_error) {
+      planBox.append(el("div", "warn", "No weather per leg: " + plan.weather_error));
+    }
+    const link = el("a", "point-btn", "Download GPX");
+    link.href = "/api/passage_plan.gpx?" + q;
+    link.setAttribute("download", `passage_plan_${kind}.gpx`);
+    planBox.append(link, el("div", "meta", plan.note));
+  } catch (err) {
+    planBox.replaceChildren(el("div", "warn", "Passage plan not available: " + err.message));
+  }
+}
+
+// Vessel profiles (/api/vessel_profiles, rules/vessel_profiles.yaml): choosing one fills the
+// settings; every value can still be changed. The profile also gives the values only the rule
+// check uses (squat block coefficient, dwt), sent as "profile".
+const PROFILE_INPUTS = { speed_kn: "route-speed", draft_m: "route-draft", margin_m: "route-margin",
+  air_draught_m: "route-air-draught", wind_limit_bft: "route-wind-limit", gust_limit_bft: "route-gust-limit",
+  waves_limit_m: "route-waves-limit" };
+let vesselProfiles = null;
+
+async function loadProfiles() {
+  try {
+    const r = await fetch("/api/vessel_profiles");
+    if (!r.ok) return;
+    vesselProfiles = await r.json();
+    const select = document.getElementById("route-profile");
+    select.replaceChildren();
+    Object.entries(vesselProfiles.profiles).forEach(([name, p]) => {
+      const option = el("option", null, p.label);
+      option.value = name;
+      option.selected = name === vesselProfiles.default;
+      select.append(option);
+    });
+    showProfileNote();
+  } catch (err) { /* the default settings stay */ }
+}
+
+function showProfileNote() {
+  const p = vesselProfiles && vesselProfiles.profiles[document.getElementById("route-profile").value];
+  document.getElementById("route-profile-note").textContent = p
+    ? `UKC policy ${p.ukc_policy.type === "fixed" ? p.ukc_policy.value_m + " m" :
+                   p.ukc_policy.percent + " % of draft, min " + p.ukc_policy.min_m + " m"}` +
+      (p.dwt ? ` · ${p.dwt.toLocaleString("en")} dwt` : "")
+    : "";
+}
+
+document.getElementById("route-profile").addEventListener("change", () => {
+  const p = vesselProfiles && vesselProfiles.profiles[document.getElementById("route-profile").value];
+  if (!p) return;
+  Object.entries(PROFILE_INPUTS).forEach(([key, id]) => { document.getElementById(id).value = p[key]; });
+  showProfileNote();
+  loadShallow();                                   // the draft changed: redraw the shallow layer
+  showRouteResult();
+});
+loadProfiles();
+
+// "Rule check" (rule_checker.py, rules/passage_rules.yaml): failed and warned rules first;
+// not-modelled rules collapsed. Every cell is plain text (DOM nodes, not HTML).
+const RULE_STATUS = { fail: "FAIL", warn: "warn", pass: "pass", not_modelled: "not modelled" };
+
+function ruleTable(rows) {
+  const table = el("table", "legs");
+  const head = el("tr");
+  ["Rule", "Factor", "Status", "Value", "Limit"].forEach(h => head.append(el("th", null, h)));
+  table.append(head);
+  rows.forEach(row => {
+    const tr = el("tr", "rule-" + row.status);
+    tr.title = row.source + (row.detail ? " — " + row.detail : "");
+    [row.id, row.factor, RULE_STATUS[row.status], row.value != null ? row.value : (row.detail || "–"),
+     row.limit != null ? row.limit : "–"]
+      .forEach(v => tr.append(el("td", null, String(v))));
+    table.append(tr);
+  });
+  return table;
+}
+
+function showRules() {
+  const box = document.getElementById("route-rules");
+  box.replaceChildren();
+  const rc = lastRoute && lastRoute.rule_check;
+  if (!rc) return;
+  const c = rc.counts;
+  box.append(el("h3", null, "Rule check"),
+             el("div", c.fail ? "warn" : "meta",
+                `${c.fail} failed · ${c.warn} warnings · ${c.pass} passed · ${c.not_modelled} not modelled`));
+  box.append(ruleTable(rc.rows.filter(row => row.status !== "not_modelled")));
+  const nm = rc.rows.filter(row => row.status === "not_modelled");
+  if (nm.length) {
+    const d = el("details");
+    d.append(el("summary", null, `Not modelled (${nm.length})`), ruleTable(nm));
+    box.append(d);
+  }
+  box.append(el("div", "meta", rc.note));
 }
 
 // "Why this route?": the same trip with the rules added one by one (computed in code).
@@ -1094,11 +1455,13 @@ function showWhy() {
   box.append(el("div", "meta", lastExplain.main_reason_sentence));      // built in code (routing.explain)
 }
 
-const LEG_COLOR = { green: "#3ddc97", yellow: "#ffd166", red: "#ff5d5d" };
-const STATUS_TEXT = { green: "calm", yellow: "caution", red: "too rough" };
+const LEG_COLOR = { green: "#3ddc97", yellow: "#ffd166", red: "#ff5d5d", none: "#8aa4b8" };
+const STATUS_TEXT = { green: "calm", yellow: "caution", red: "too rough", none: "no forecast" };
 const hhmm = iso => new Date(iso).toLocaleTimeString("en-GB", { hour: "2-digit", minute: "2-digit" });
 
 function legText(g) {
+  if (g.status === "none") return `Leg ${g.leg} (km ${g.from_km}–${g.to_km}) at ${hhmm(g.time_utc)}: no forecast ` +
+    "(after the end of the forecast)";
   return `Leg ${g.leg} (km ${g.from_km}–${g.to_km}) at ${hhmm(g.time_utc)}: Beaufort ${g.wind_bft}` +
     (g.gust_ms !== null ? `, gusts ${g.gust_ms} m/s` : "") +
     (g.waves_m !== null ? `, waves ${g.waves_m} m` : "") + ` · ${STATUS_TEXT[g.status]}`;
@@ -1127,11 +1490,18 @@ function showLegs() {
       .forEach(([name, v]) => {
         const tr = el("tr");
         tr.append(el("td", null, name), el("td", null, `${v.distance_km} km`), el("td", null, v.eta_text),
-                  el("td", null, `Bft ${v.max_wind_bft}` + (v.max_waves_m !== null ? `, ${v.max_waves_m} m` : "")),
+                  el("td", null, v.max_wind_bft === undefined ? "–"
+                    : `Bft ${v.max_wind_bft}` + (v.max_waves_m !== null ? `, ${v.max_waves_m} m` : "")),
                   el("td", null, String(v.rough_count)));
         t.append(tr);
       });
     box.append(t);
+  }
+  const beyond = w.no_forecast_legs || [];
+  if (beyond.length) {
+    box.append(el("div", "warn", `⚠ No forecast for ${beyond.length} of ${w.legs.length + beyond.length} legs ` +
+      `(legs ${beyond[0].leg}–${beyond[beyond.length - 1].leg}, from ${hhmm(beyond[0].time_utc)}): the forecast ends ` +
+      `${new Date(w.forecast_end_utc).toLocaleString("en-GB")}. Rule R-WX-04 warns.`));
   }
   const table = el("table", "why legs");
   const head = el("tr");
@@ -1144,6 +1514,12 @@ function showLegs() {
               el("td", null, `Bft ${g.wind_bft}` + (g.gust_ms !== null ? ` (gusts ${g.gust_ms})` : "")),
               el("td", null, g.waves_m === null ? "–" : `${g.waves_m} m`),
               el("td", "st " + g.status, STATUS_TEXT[g.status]));
+    table.append(tr);
+  });
+  beyond.forEach(g => {
+    const tr = el("tr");
+    tr.append(el("td", null, hhmm(g.time_utc)), el("td", null, `km ${g.from_km}–${g.to_km}`),
+              el("td", null, "–"), el("td", null, "–"), el("td", "st none", STATUS_TEXT.none));
     table.append(tr);
   });
   box.append(table);
@@ -1161,6 +1537,7 @@ function clearRoute() {
   routeRequest = null;
   updateChatHeader();
   showRouteResult();
+  showRouteError(null);
   document.getElementById("route-hint").textContent = "Click the start on the map, then the destination.";
 }
 
@@ -1213,10 +1590,11 @@ async function routeClick(latlng) {
 let routeRun = 0;                     // only the newest computation may draw
 
 async function computeRoute(from, to) {
+  await clockReady;                    // the default departure comes from /api/clock
   const run = ++routeRun;
   routeLayer.clearLayers();
-  routeMarker(from, "Start");
-  routeMarker(to, "Destination");
+  const startMarker = routeMarker(from, "Start");
+  const endMarker = routeMarker(to, "Destination");
   const hint = document.getElementById("route-hint");
   let settings;
   try {
@@ -1238,7 +1616,11 @@ async function computeRoute(from, to) {
     const r = await fetch("/api/route?" + q);
     const body = await r.json();
     if (run !== routeRun) return;                  // the settings changed meanwhile
-    if (!r.ok) throw new Error(Array.isArray(body.detail) ? "Invalid points or settings." : body.detail);
+    if (!r.ok) {
+      throw Object.assign(new Error(Array.isArray(body.detail) ? "Invalid points or settings." : body.detail),
+                          { problem: body.problem });
+    }
+    showRouteError(null);
     lastRoute = body;
     lastExplain = null;
     routeRequest = request;
@@ -1250,9 +1632,16 @@ async function computeRoute(from, to) {
         .bindPopup(() => el("div", null, `Alternative with full buffers: ${body.alternative.distance_km} km`))
         .addTo(routeLayer);
     }
+    // A click on land (or too close to it) snaps to usable water: the marker moves to the
+    // snapped point, with a small dashed line from the click.
     const dashed = { color: "#ffd166", weight: 2, opacity: 0.8, dashArray: "4 6", interactive: false };
-    L.polyline([body.start.clicked, body.start.snapped], dashed).addTo(routeLayer);
-    L.polyline([body.end.snapped, body.end.clicked], dashed).addTo(routeLayer);
+    [[startMarker, body.start], [endMarker, body.end]].forEach(([marker, end]) => {
+      if (end.snap_km < 0.01) return;
+      marker.setLatLng(end.snapped);
+      L.polyline([end.clicked, end.snapped], dashed).addTo(routeLayer);
+      L.circleMarker(end.clicked, { radius: 3, color: "#ffd166", weight: 1, fillOpacity: 0, interactive: false })
+        .addTo(routeLayer);
+    });
     showRouteResult();
     const w = body.weather;
     if (w && w.shortest && w.shortest.path && JSON.stringify(w.shortest.path) !== JSON.stringify(body.path)) {
@@ -1260,8 +1649,10 @@ async function computeRoute(from, to) {
         .bindPopup(() => el("div", null, `Shortest route: ${w.shortest.distance_km} km, ${w.shortest.rough_count} rough legs`))
         .addTo(routeLayer);
     }
-    if (w && w.legs.length && w.legs[0].coords) {
-      w.legs.forEach(g => L.polyline(g.coords, { color: LEG_COLOR[g.status], weight: 5, opacity: 0.95 })
+    const allLegs = w ? w.legs.concat(w.no_forecast_legs || []) : [];
+    if (allLegs.length && allLegs[0].coords) {
+      allLegs.forEach(g => L.polyline(g.coords, { color: LEG_COLOR[g.status], weight: 5, opacity: 0.95,
+                                                  dashArray: g.status === "none" ? "6 6" : null })
         .bindPopup(() => el("div", null, legText(g)))
         .addTo(routeLayer));
     } else {
@@ -1282,15 +1673,23 @@ async function computeRoute(from, to) {
     routeEnds = [from, to];                        // keep the points: a new setting may make it possible
     routeStart = null;                             // ...but the next click starts a new route
     showRouteResult();
-    hint.textContent = "Not possible: " + err.message + " Change a setting or click a new start.";
+    const problem = err.problem || null;
+    if (problem && problem.short && (problem.which === "start" || problem.which === "end")) {
+      routeLayer.clearLayers();                    // the failed point: a red × with the reason
+      const failed = problem.which === "start" ? from : to;
+      routeMarker(problem.which === "start" ? to : from, problem.which === "start" ? "Destination" : "Start");
+      failedMarker(failed, problem.which === "start" ? "Start" : "Destination", problem.short);
+    }
+    showRouteError(err.message, problem);
+    hint.textContent = "Not possible (see the red box). Change a setting or click a new start.";
   }
 }
 
 // Any route setting changes -> recalculate the current route (debounced).
 let recalcTimer = null;
-["route-speed", "route-draft", "route-margin", "route-land-buffer", "route-zone-buffer",
+["route-profile", "route-speed", "route-draft", "route-margin", "route-land-buffer", "route-zone-buffer",
  "route-passage-land", "route-passage-zone", "route-zones", "route-penalty", "route-departure",
- "route-wind-farms", "route-turbine-radius",
+ "route-wind-farms", "route-turbine-radius", "route-gust-limit", "route-air-draught",
  "route-variant", "route-wind-limit", "route-waves-limit"].forEach(id =>
   ["input", "change"].forEach(type => document.getElementById(id).addEventListener(type, () => {
     clearTimeout(recalcTimer);
@@ -1311,7 +1710,7 @@ async function loadExplain(request, forRoute) {
 }
 
 document.getElementById("route-clear").addEventListener("click", clearRoute);
-["route-form", "route-weather-form", "route-boat", "route-buffers", "route-passages", "route-zones-form"].forEach(id =>
+["route-profile-form", "route-form", "route-weather-form", "route-boat", "route-buffers", "route-passages", "route-zones-form"].forEach(id =>
   document.getElementById(id).addEventListener("submit", e => e.preventDefault()));
 document.getElementById("route-speed").addEventListener("input", showRouteResult);
 
@@ -1378,13 +1777,13 @@ let shallowKey = null, shallowTimer = null;
 const mercator = lat => Math.log(Math.tan(Math.PI / 4 + lat * Math.PI / 360));
 
 async function loadShallow() {
-  let draft_m, margin_m;
-  try { ({ draft_m, margin_m } = routeSettings()); } catch (err) { return; }   // invalid: keep the layer
-  const key = `${draft_m}+${margin_m}`;
+  let draft_m, margin_m, profile, speed_kn;
+  try { ({ draft_m, margin_m, profile, speed_kn } = routeSettings()); } catch (err) { return; }   // invalid: keep the layer
+  const key = `${draft_m}+${margin_m}+${profile}+${speed_kn}`;
   if (key === shallowKey) return;
   shallowKey = key;
   try {
-    const r = await fetch("/api/route_shallow?" + new URLSearchParams({ draft_m, margin_m }));
+    const r = await fetch("/api/route_shallow?" + new URLSearchParams({ draft_m, margin_m, profile, speed_kn }));
     if (!r.ok) throw new Error((await r.json()).detail || r.statusText);
     const m = await r.json();
     if (shallowKey !== key) return;                 // settings changed meanwhile
@@ -1415,7 +1814,7 @@ async function loadShallow() {
     document.getElementById("route-hint").textContent = "Depth layer not shown: " + err.message;
   }
 }
-["route-draft", "route-margin"].forEach(id => document.getElementById(id).addEventListener("input", () => {
+["route-draft", "route-margin", "route-speed", "route-profile"].forEach(id => document.getElementById(id).addEventListener("input", () => {
   clearTimeout(shallowTimer);
   shallowTimer = setTimeout(() => { if (activeTab === "tab-route") loadShallow(); }, 400);
 }));

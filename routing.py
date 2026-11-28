@@ -62,6 +62,7 @@ BASE_STEPS = [(0, 1), (1, 0), (1, 1), (1, -1)]    # the other 4 are the same ste
 # --- rule settings (defaults; the Route tab can change them) -------------------
 DRAFT_M = 2.0                            # the boat's draft
 SAFETY_MARGIN_M = 1.0                    # extra water under the keel (water level, data errors)
+MAX_DRAFT_M = 20.0                 # the largest draft the API accepts (the large-ship profile has 12.5 m)
 LAND_BUFFER_M = 300                      # keep at least this far from land
 ZONE_BUFFER_M = 500                      # keep at least this far from blocked zones
 SAMPLE_KM = 0.02                         # rules are checked every 20 m along steps and lines
@@ -143,7 +144,18 @@ NOT_FOR_NAVIGATION = "Not for navigation."
 
 
 class RouteError(ValueError):
-    """The route can't be computed (outside the area, no usable water nearby, no connection)."""
+    """The route can't be computed (outside the area, no usable water nearby, no connection).
+    Optional details for the page: which point failed ("start" / "end"), where it is (at =
+    [lat, lon]), a short reason ("Too shallow: 0.0 m here, needs 3.9 m") and its kind
+    ("land", "shallow", "zone", "turbine", "zone_buffer", "land_buffer", "cut_off", "area")."""
+
+    def __init__(self, message: str, which: str | None = None, at: list | None = None,
+                 short: str | None = None, kind: str | None = None):
+        super().__init__(message)
+        self.which, self.at, self.short, self.kind = which, at, short, kind
+
+    def problem(self) -> dict:
+        return {"message": str(self), "which": self.which, "at": self.at, "short": self.short, "kind": self.kind}
 
 
 class RoutingDataMissing(FileNotFoundError):
@@ -169,6 +181,11 @@ class Rules:
     passage_zone_buffer_km: float = 0.0
     penalty_factor: float = ZONE_PENALTY
     turbine_radius_km: float = TURBINE_RADIUS_M / 1000   # a turbine is a circle of this radius
+    squat_m: float = 0.0                           # part of required_depth_m (vessel profiles)
+
+    @property
+    def depth_label(self) -> str:
+        return "draft + squat + safety margin" if self.squat_m else "draft + safety margin"
 
 
 LAND_ONLY = Rules()
@@ -532,9 +549,13 @@ def make_rules(draft_m: float = DRAFT_M, margin_m: float = SAFETY_MARGIN_M, zone
                passages: bool = True, passage_land_buffer_m: float = PASSAGE_LAND_BUFFER_M,
                passage_zone_buffer_m: float = PASSAGE_ZONE_BUFFER_M,
                penalty_factor: float = ZONE_PENALTY, wind_farms: str = "block",
-               turbine_radius_m: float = TURBINE_RADIUS_M) -> Rules:
+               turbine_radius_m: float = TURBINE_RADIUS_M, squat_m: float = 0.0) -> Rules:
+    """squat_m: the squat allowance added to the required depth (draft + squat + margin);
+    voyage.router_settings() computes it from the vessel profile (Barrass)."""
     if draft_m <= 0 or margin_m < 0:
         raise RouteError("Draft must be more than 0 m and the margin at least 0 m.")
+    if not (isinstance(squat_m, (int, float)) and math.isfinite(squat_m) and 0 <= squat_m <= 5):
+        raise RouteError("The squat allowance must be between 0 and 5 m.")
     if min(land_buffer_m, zone_buffer_m, passage_land_buffer_m, passage_zone_buffer_m) < 0:
         raise RouteError("Buffers can't be negative.")
     if not (isinstance(penalty_factor, (int, float)) and math.isfinite(penalty_factor)
@@ -545,7 +566,7 @@ def make_rules(draft_m: float = DRAFT_M, margin_m: float = SAFETY_MARGIN_M, zone
         raise RouteError(f"The turbine radius must be between {TURBINE_RADIUS_RANGE[0]} and "
                          f"{TURBINE_RADIUS_RANGE[1]} m.")
     rules = zone_rules(zones, wind_farms)
-    return Rules(required_depth_m=round(draft_m + margin_m, 2),
+    return Rules(required_depth_m=round(draft_m + squat_m + margin_m, 2), squat_m=round(float(squat_m), 2),
                  block=tuple(sorted(c for c, r in rules.items() if r == "block")),
                  penalty=tuple(sorted(c for c, r in rules.items() if r == "penalty")),
                  land_buffer_km=land_buffer_m / 1000, zone_buffer_km=zone_buffer_m / 1000,
@@ -729,43 +750,60 @@ def usable_mask(grid: Grid, terms: list) -> np.ndarray:
 def _in_box(lat: float, lon: float):
     lon0, lat0, lon1, lat1 = ROUTE_BBOX
     if not (lon0 <= lon <= lon1 and lat0 <= lat <= lat1):
-        raise RouteError(f"Outside the routing area ({lat0}–{lat1}° N, {lon0}–{lon1}° E).")
+        raise RouteError(f"Outside the routing area ({lat0}–{lat1}° N, {lon0}–{lon1}° E).",
+                         at=[round(lat, 5), round(lon, 5)], kind="area", short="Outside the routing area")
+
+
+def point_check(lat: float, lon: float, rules: Rules) -> tuple[str, str, str] | None:
+    """Why this exact point can't be used with these rules -> (kind, reason, short reason), or
+    None if the point itself is fine. The reason is a phrase for longer messages; the short
+    reason is a headline ("Too shallow: 0.0 m here, needs 3.9 m")."""
+    x, y = tools._to_km(lon, lat)
+    p = Point(x, y)
+    if _land_exact().contains(p):
+        return "land", "this point is on land", "On land"
+    if rules.required_depth_m is not None:
+        d = float(load_depth().at(x, y))
+        if d < rules.required_depth_m:
+            return ("shallow", f"the water here is {max(d, 0):.1f} m deep, the boat needs at least "
+                               f"{rules.required_depth_m:g} m ({rules.depth_label})",
+                    f"Too shallow: {max(d, 0):.1f} m here, needs {rules.required_depth_m:g} m")
+    for z in load_zones():
+        if z.category not in rules.block:
+            continue
+        if z.kind == "turbine" and z.geom_km.distance(p) < rules.turbine_radius_km:
+            m = z.geom_km.distance(p) * 1000
+            return ("turbine", f"this point is {m:.0f} m from a wind turbine ({z.name}); "
+                               f"the turbine radius is {rules.turbine_radius_km * 1000:.0f} m",
+                    f"Too close to a wind turbine: {m:.0f} m, needs {rules.turbine_radius_km * 1000:.0f} m")
+        if z.kind == "area" and z.geom_km.contains(p):
+            return ("zone", f"this point is inside {z.name} ({CATEGORY_LABEL[z.category]}, closed with the "
+                            "current settings)", f"Inside a closed zone: {z.name}")
+    if rules.block and rules.zone_buffer_km > 0:
+        dist, z = min(((z.geom_km.distance(p), z) for z in load_zones()
+                       if z.category in rules.block and not no_buffer(z)), key=lambda t: t[0])
+        if dist < rules.zone_buffer_km + RASTER_TOL_KM:
+            return ("zone_buffer", f"this point is {dist * 1000:.0f} m from {z.name} ({CATEGORY_LABEL[z.category]}); "
+                                   f"the zone buffer is {rules.zone_buffer_km * 1000:.0f} m",
+                    f"Too close to {z.name}: {dist * 1000:.0f} m, needs {rules.zone_buffer_km * 1000:.0f} m")
+    if rules.land_buffer_km > 0:
+        dist = float(land_distance().at(x, y))
+        in_passage = rules.passages and float(passage_raster().at(x, y)) > 0
+        buffer_km = rules.passage_land_buffer_km if in_passage else rules.land_buffer_km
+        if dist < buffer_km + RASTER_TOL_KM:
+            return ("land_buffer", f"this point is about {dist * 1000:.0f} m from land; the land buffer is "
+                                   f"{buffer_km * 1000:.0f} m" + (" (narrow passage)" if in_passage else ""),
+                    f"Too close to land: about {dist * 1000:.0f} m, needs {buffer_km * 1000:.0f} m")
+    return None
 
 
 def point_reason(lat: float, lon: float, rules: Rules, connection: bool = True) -> str | None:
     """Why this exact point can't be used with these rules (in plain words, with values).
     If the point itself is fine, its water is cut off: connection=True names what blocks the
     connection to the open sea (connection_reason); connection=False returns None then."""
-    x, y = tools._to_km(lon, lat)
-    p = Point(x, y)
-    if _land_exact().contains(p):
-        return "this point is on land"
-    if rules.required_depth_m is not None:
-        d = float(load_depth().at(x, y))
-        if d < rules.required_depth_m:
-            return (f"the water here is {max(d, 0):.1f} m deep, the boat needs at least "
-                    f"{rules.required_depth_m:g} m (draft + safety margin)")
-    for z in load_zones():
-        if z.category not in rules.block:
-            continue
-        if z.kind == "turbine" and z.geom_km.distance(p) < rules.turbine_radius_km:
-            return (f"this point is {z.geom_km.distance(p) * 1000:.0f} m from a wind turbine ({z.name}); "
-                    f"the turbine radius is {rules.turbine_radius_km * 1000:.0f} m")
-        if z.kind == "area" and z.geom_km.contains(p):
-            return f"this point is inside {z.name} ({CATEGORY_LABEL[z.category]}, closed with the current settings)"
-    if rules.block and rules.zone_buffer_km > 0:
-        dist, z = min(((z.geom_km.distance(p), z) for z in load_zones()
-                       if z.category in rules.block and not no_buffer(z)), key=lambda t: t[0])
-        if dist < rules.zone_buffer_km + RASTER_TOL_KM:
-            return (f"this point is {dist * 1000:.0f} m from {z.name} ({CATEGORY_LABEL[z.category]}); "
-                    f"the zone buffer is {rules.zone_buffer_km * 1000:.0f} m")
-    if rules.land_buffer_km > 0:
-        dist = float(land_distance().at(x, y))
-        in_passage = rules.passages and float(passage_raster().at(x, y)) > 0
-        buffer_km = rules.passage_land_buffer_km if in_passage else rules.land_buffer_km
-        if dist < buffer_km + RASTER_TOL_KM:
-            return (f"this point is about {dist * 1000:.0f} m from land; the land buffer is {buffer_km * 1000:.0f} m"
-                    + (" (narrow passage)" if in_passage else ""))
+    found = point_check(lat, lon, rules)
+    if found:
+        return found[1]
     if not connection:
         return None
     return (connection_reason(lat, lon, rules, build_grid().cell_km)
@@ -778,6 +816,7 @@ def snap(grid: Grid, mask: np.ndarray, lat: float, lon: float,
     _in_box(lat, lon)
     x, y = tools._to_km(lon, lat)
     rows, cols = np.nonzero(mask)
+    at = [round(lat, 5), round(lon, 5)]
     if not len(rows):
         raise RouteError("No usable water at all with these settings.")
     # A click IN water that has no water connection to the open sea (a lagoon, or water that
@@ -785,16 +824,20 @@ def snap(grid: Grid, mask: np.ndarray, lat: float, lon: float,
     here = (int((y - grid.y0) // grid.cell_km), int((x - grid.x0) // grid.cell_km))
     if (0 <= here[0] < grid.water.shape[0] and 0 <= here[1] < grid.water.shape[1] and grid.water[here]
             and not build_plan(grid.cell_km, LAND_ONLY, []).usable[here]):
-        local = point_reason(lat, lon, rules, connection=False)
+        found = point_check(lat, lon, rules)
+        local = found[1] if found else None
         connection = connection_reason(lat, lon, rules, grid.cell_km)
         raise RouteError("No route from here: " + (f"{local}; " if local else "")
-                         + (connection or "this water has no connection to the open sea").rstrip(".") + ".")
+                         + (connection or "this water has no connection to the open sea").rstrip(".") + ".",
+                         at=at, kind=found[0] if found else "cut_off",
+                         short=found[2] if found else "Cut off from the open sea with these settings")
     cx = grid.x0 + (cols + 0.5) * grid.cell_km
     cy = grid.y0 + (rows + 0.5) * grid.cell_km
     dist = np.hypot(cx - x, cy - y)
     best = int(np.argmin(dist))
     if dist[best] > MAX_SNAP_KM:
-        local = point_reason(lat, lon, rules, connection=False)
+        found = point_check(lat, lon, rules)
+        local = found[1] if found else None
         connection = connection_reason(lat, lon, rules, grid.cell_km)
         text = f"No usable water within {MAX_SNAP_KM:g} km"
         if local:
@@ -803,7 +846,8 @@ def snap(grid: Grid, mask: np.ndarray, lat: float, lon: float,
             text += (" " if local else ". ") + "No route from here: " + connection
         elif not local:
             text += ": the water here is cut off from the open sea with the current settings."
-        raise RouteError(text)
+        raise RouteError(text, at=at, kind=found[0] if found else "cut_off",
+                         short=found[2] if found else f"No usable water within {MAX_SNAP_KM:g} km")
     return (int(rows[best]), int(cols[best])), float(dist[best])
 
 
@@ -1153,7 +1197,8 @@ def _best_line(candidates, rules: Rules, grid: Grid, terms: list, extra_ok=None)
 def _departure(departure) -> "pd.Timestamp":
     import pandas as pd
     if departure is None:
-        return pd.Timestamp.now(tz="UTC").floor("min")
+        import clock
+        return clock.now().floor("min")
     t = pd.Timestamp(departure)
     return t.tz_localize("UTC") if t.tz is None else t.tz_convert("UTC")
 
@@ -1231,7 +1276,7 @@ def route(from_lat: float, from_lon: float, to_lat: float, to_lon: float,
           passage_zone_buffer_m: float = PASSAGE_ZONE_BUFFER_M, penalty_factor: float = ZONE_PENALTY,
           alternative: bool = True, weather: str = "off", wind_limit_bft: int = None,
           waves_limit_m: float = None, rough_penalty: float = None, wind_farms: str = "block",
-          turbine_radius_m: float = TURBINE_RADIUS_M) -> dict:
+          turbine_radius_m: float = TURBINE_RADIUS_M, squat_m: float = 0.0) -> dict:
     """The cheapest water route between two points. Raises RouteError with a clear message.
     terms=None: the phase 2 rules from the settings (depth, zones, buffers, narrow passages),
     or `rules`. terms=[...]: land only plus exactly these custom terms (terms=[] is phase 1).
@@ -1246,7 +1291,7 @@ def route(from_lat: float, from_lon: float, to_lat: float, to_lon: float,
     if rules is None:
         rules = (make_rules(draft_m, margin_m, zones, land_buffer_m, zone_buffer_m, passages,
                             passage_land_buffer_m, passage_zone_buffer_m, penalty_factor,
-                            wind_farms, turbine_radius_m)
+                            wind_farms, turbine_radius_m, squat_m)
                  if with_rules else LAND_ONLY)
     terms = terms or []
     plan = build_plan(cell_km, rules, terms)
@@ -1254,11 +1299,11 @@ def route(from_lat: float, from_lon: float, to_lat: float, to_lon: float,
     try:
         start, start_snap = snap(grid, plan.usable, from_lat, from_lon, rules)
     except RouteError as exc:
-        raise RouteError(f"Start: {exc}") from None
+        raise RouteError(f"Start: {exc}", "start", exc.at, exc.short, exc.kind) from None
     try:
         goal, goal_snap = snap(grid, plan.usable, to_lat, to_lon, rules)
     except RouteError as exc:
-        raise RouteError(f"Destination: {exc}") from None
+        raise RouteError(f"Destination: {exc}", "end", exc.at, exc.short, exc.kind) from None
 
     if start == goal:
         candidates, reached = [[start]], 1
@@ -1281,7 +1326,7 @@ def route(from_lat: float, from_lon: float, to_lat: float, to_lon: float,
         try:
             if weather == "aware":
                 field = rw.get_field(rw.corridor_points(shortest_path, ends))
-                shortest_legs = rw.legs_along(shortest_path, dep, speed_kn, field, **limits)
+                shortest_legs, shortest_beyond = rw.legs_split(shortest_path, dep, speed_kn, field, **limits)
                 rough = _rough_squares(plan, start, field, dep, speed_kn, limits)
                 if rough.any() and start != goal:
                     graph = _with_rough_penalty(plan, rough, ROUGH_PENALTY if rough_penalty is None else rough_penalty)
@@ -1295,11 +1340,14 @@ def route(from_lat: float, from_lon: float, to_lat: float, to_lon: float,
             path_now = [_lat_lon(p) for p in points]
             if field is None:
                 field = rw.get_field([(lat, lon) for lat, lon in _leg_midpoints(path_now)])
-            legs = rw.legs_along(path_now, dep, speed_kn, field, **limits)
+            legs, beyond = rw.legs_split(path_now, dep, speed_kn, field, **limits)
         except rw.RouteWeatherError as exc:
             raise RouteError(str(exc)) from exc
+        # Legs after the end of the forecast have no weather ("no_forecast_legs"): the route is
+        # still given; rule R-WX-04 warns and the panel / passage plan list those legs.
         weather_info = {"variant": weather, "departure_utc": dep.strftime("%Y-%m-%dT%H:%MZ"),
-                        "legs": legs, **rw.summarize(legs),
+                        "legs": legs, **rw.summarize(legs), "no_forecast_legs": beyond,
+                        "forecast_end_utc": field.times[-1].strftime("%Y-%m-%dT%H:%MZ"),
                         "limits": {**limits, "caution_from_bft": rw.CAUTION_BFT, "caution_waves_m": rw.CAUTION_WAVES_M},
                         "source": field.source, "note": field.note}
         if weather == "aware":
@@ -1308,7 +1356,7 @@ def route(from_lat: float, from_lon: float, to_lat: float, to_lon: float,
             if changed and weather_info["rough_count"] >= short_sum["rough_count"]:
                 # Not calmer: keep the shortest route (an avoiding detour that doesn't help is no use).
                 points = [tools._to_km(lon, lat) for lat, lon in shortest_path]
-                weather_info.update({"legs": shortest_legs, **short_sum,
+                weather_info.update({"legs": shortest_legs, **short_sum, "no_forecast_legs": shortest_beyond,
                                      "note": ((weather_info["note"] + "; ") if weather_info["note"] else "")
                                      + "no calmer route found, so this is the shortest route"})
                 changed = False
@@ -1391,7 +1439,8 @@ def route(from_lat: float, from_lon: float, to_lat: float, to_lon: float,
             "alternative": alt,
             "zone_km_inside_penalty": (round(length_inside(points, rules.penalty, rules.turbine_radius_km), 2)
                                        if rules.penalty else 0.0),
-            "settings": {"draft_m": draft_m, "margin_m": margin_m, "zones": zones, "wind_farms": wind_farms,
+            "settings": {"draft_m": draft_m, "margin_m": margin_m, "squat_m": rules.squat_m,
+                         "zones": zones, "wind_farms": wind_farms,
                          "turbine_radius_m": rules.turbine_radius_km * 1000,
                          "land_buffer_m": rules.land_buffer_km * 1000, "zone_buffer_m": rules.zone_buffer_km * 1000,
                          "passages": rules.passages,
@@ -1487,13 +1536,15 @@ def explain(from_lat: float, from_lon: float, to_lat: float, to_lon: float,
             passage_land_buffer_m: float = PASSAGE_LAND_BUFFER_M,
             passage_zone_buffer_m: float = PASSAGE_ZONE_BUFFER_M, penalty_factor: float = ZONE_PENALTY,
             weather: str = "off", departure=None, wind_limit_bft: int = None, waves_limit_m: float = None,
-            rough_penalty: float = None, wind_farms: str = "block", turbine_radius_m: float = TURBINE_RADIUS_M) -> dict:
+            rough_penalty: float = None, wind_farms: str = "block", turbine_radius_m: float = TURBINE_RADIUS_M,
+            squat_m: float = 0.0) -> dict:
     """The route plus a detour breakdown, all computed in code: the same trip with the rules
     added one by one (land only -> + depth -> + zones -> + buffers). Steps within +-NOISE_KM
     are shown as "≈ 0 km (grid rounding)"; adding a rule can't really make a route shorter."""
     full = make_rules(draft_m, margin_m, zones, land_buffer_m, zone_buffer_m, passages,
-                      passage_land_buffer_m, passage_zone_buffer_m, penalty_factor, wind_farms, turbine_radius_m)
-    depth_only = Rules(required_depth_m=full.required_depth_m)
+                      passage_land_buffer_m, passage_zone_buffer_m, penalty_factor, wind_farms, turbine_radius_m,
+                      squat_m)
+    depth_only = Rules(required_depth_m=full.required_depth_m, squat_m=full.squat_m)
     with_zones = replace(depth_only, block=full.block, penalty=full.penalty, penalty_factor=full.penalty_factor,
                          turbine_radius_km=full.turbine_radius_km)
     buffer_label = f"+ safety buffers ({land_buffer_m:g} m from land, {zone_buffer_m:g} m from closed zones"
@@ -1655,11 +1706,12 @@ def explain(from_lat: float, from_lon: float, to_lat: float, to_lon: float,
     }
 
 
-def shallow_mask(draft_m: float = DRAFT_M, margin_m: float = SAFETY_MARGIN_M, cell_km: float = CELL_KM) -> dict:
-    """Water squares shallower than draft + margin, for the map layer (rows south -> north,
-    packed bits, base64)."""
+def shallow_mask(draft_m: float = DRAFT_M, margin_m: float = SAFETY_MARGIN_M, cell_km: float = CELL_KM,
+                 squat_m: float = 0.0) -> dict:
+    """Water squares shallower than draft + squat + margin, for the map layer (rows south ->
+    north, packed bits, base64)."""
     grid = build_grid(cell_km)
-    required = round(draft_m + margin_m, 2)
+    required = round(draft_m + squat_m + margin_m, 2)
     mask = grid.water & (centre_values(cell_km, "depth") < required)
     return {"required_depth_m": required, "rows": int(mask.shape[0]), "cols": int(mask.shape[1]),
             "bounds": grid.lonlat_bounds(),
